@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ucv>
+  <entry id="lv1-ids" kind="unifiable" level="1">
+    <components>⿱二一⿰一一</components>
+  </entry>
+  <entry id="lv2-component" kind="unifiable" level="2">
+    <components>一二</components>
+  </entry>
+  <entry id="private-only" kind="unifiable" level="1">
+    <components></components>
+  </entry>
+  <entry id="lv2-placeholder" kind="unifiable" level="2">
+    <components>⿰二⬚⿰冫⬚</components>
+  </entry>
+  <entry id="lv1-fullwidth-placeholders" kind="unifiable" level="1">
+    <components>⿰ＸＹ⿺ＸＹ</components>
+  </entry>
+  <entry id="lv1-vertical-structure" kind="unifiable" level="1">
+    <components>⿱ＸＹ⿸ＸＹ</components>
+  </entry>
+  <entry id="lv2-distinct-placeholders" kind="unifiable" level="2">
+    <components>⿱雨⿰⬚⬚⿰⬚⿱雨⬚</components>
+  </entry>
+  <entry id="private-in-expression" kind="unifiable" level="1">
+    <components>⿰一⿰二三</components>
+  </entry>
+  <entry id="lv1-nested-placeholder" kind="unifiable" level="1">
+    <components>⿰⬚焦⿱⿰⬚隹灬</components>
+  </entry>
+</ucv>

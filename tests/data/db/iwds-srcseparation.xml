@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ucv>
+  <entry id="fixture" kind="unifiable" level="1">
+    <glyphs>u7532,u4e59,u4e19</glyphs>
+    <components>甲乙丙</components>
+    <SourceCodeSeparation>甲乙,乙丙</SourceCodeSeparation>
+  </entry>
+</ucv>

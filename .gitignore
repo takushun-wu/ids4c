@@ -1,0 +1,38 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+cmake_install.cmake
+install_manifest.txt
+
+# IDE and compiler files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.vcxproj.user
+
+# Runtime databases and local configuration
+db/*.sqlite
+db/config.toml
+data/db/*.sqlite
+data/db/config.toml
+
+# Python and native build artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dll
+*.dylib
+
+# Test and coverage output
+Testing/
+coverage/
+*.gcda
+*.gcno
+*.gcov
