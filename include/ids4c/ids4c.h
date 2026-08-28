@@ -45,6 +45,8 @@ typedef enum {
 class IDS {
 protected:
     IDStype _type = IDS_UNKNOWN;
+    // IDS.pdf 7.1 根部唯一化分隔符；它是表达式元数据，不是结构部件。
+    std::string _uniqueSeparator;
 
 public:
     IDS()                                 = default;
@@ -55,6 +57,8 @@ public:
 
     /// 返回节点类型；不转移任何对象所有权。
     IDStype GetType();
+    const std::string& GetUniqueSeparator() const { return _uniqueSeparator; }
+    void SetUniqueSeparator(std::string separator) { _uniqueSeparator = std::move(separator); }
 };
 
 /// IDS 节点的拥有型指针；解析函数和返回 IDS 树的 API 优先使用此类型。
@@ -238,6 +242,17 @@ typedef enum {
     IDC_VERTICAL_ARRANGE,
     IDC_REPLACE
 } IDCtype;
+/**
+ * @brief HV 展开后仍需保留的原始歧义字形范围。
+ *
+ * first/last 是当前 HV 节点子部件数组中的半开区间 [first, last)。
+ * glyph 只记录 IDS 7.1 中明确使用唯一化分隔符的原始字形。
+ */
+struct HVOriginRange {
+    std::string glyph;
+    size_t      first = 0;
+    size_t      last  = 0;
+};
 
 /**
  * @brief IDS 结构节点。
@@ -252,10 +267,12 @@ protected:
     int                      _overlayRange[2]  = {0, 0};
     std::vector<std::string> _overlayType      = {};
     int                      _optionalInt      = 0;
+    std::vector<HVOriginRange> _hvOriginRanges = {};
 
 public:
     Pattern(IDCtype idc, std::vector<IDS*> pids, size_t preferSplitPoint = -1, int* overlayRange = nullptr,
-        std::vector<std::string> overlayType = {}, int optionalInt = 0);
+        std::vector<std::string> overlayType = {}, int optionalInt = 0,
+        std::vector<HVOriginRange> hvOriginRanges = {});
     Pattern(const Pattern& pattern);
     Pattern(Pattern&& pattern) noexcept;
     ~Pattern();
@@ -272,6 +289,8 @@ public:
     void                     GetOverlayRange(int* output) const;
     std::vector<std::string> GetOverlayType() const;
     int                      GetOptionalInt() const;
+    const std::vector<HVOriginRange>& GetHVOriginRanges() const;
+    void SetHVOriginRanges(std::vector<HVOriginRange> ranges);
 
     bool operator==(const Pattern& pattern);
 };

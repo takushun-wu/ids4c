@@ -16,7 +16,7 @@
 
 namespace fs = boost::filesystem;
 namespace {
-    std::string PreprocessRulesText(const IDSMatchDetail &detail) {
+    std::string PreprocessRulesText(const IDSMatchDetail& detail) {
         std::string out;
         for(const IDSPreprocessRule rule: detail.preprocessRules) {
             if(!out.empty()) out += ",";
@@ -25,9 +25,9 @@ namespace {
         return out;
     }
 
-    std::string MatchPathsText(const std::vector<IDSMatchPath> &paths) {
+    std::string MatchPathsText(const std::vector<IDSMatchPath>& paths) {
         std::string out;
-        for(const IDSMatchPath &path: paths) {
+        for(const IDSMatchPath& path: paths) {
             if(!out.empty()) out += ";";
             out += std::string(IDSMatchPathKindName(path.kind)) + ":";
             out += path.queryExpressionIndex == std::numeric_limits<size_t>::max()
@@ -115,6 +115,7 @@ IDSui::IDSui():
     idsdb.reset(new IDSdatabase(selectedDB));
     idsdb->config.fuzzyMatch.unificationLevel = unificationLevel;
     idsdb->config.fuzzyMatch.defaultRegion    = defaultRegion;
+    ParseLocaleSuffixFallbackOrder(localeSuffixFallbackOrder, idsdb->config.fuzzyMatch.localeSuffixFallbackOrder);
     // Show all children items
     show_all_children();
 }
@@ -232,7 +233,7 @@ void IDSui::ReadDatabase() {
                 if(iter->path().extension().string() == ".sqlite" && iter->path().stem().string() != "unifiable")
                     databaseList.push_back(iter->path().stem().string());
             }
-        } catch(const std::exception &ex) {
+        } catch(const std::exception& ex) {
             std::cerr << ex.what() << std::endl;
             continue;
         }
@@ -257,16 +258,18 @@ void IDSui::ReadConfigFile() {
     if(!fs::exists(cfgFile)) {
         fontCfg       = FONTCFG_DEFAULT;
         queryFontSize = QUERY_FONTSIZE_DEFAULT, resultFontSize = RESULT_FONTSIZE_DEFAULT;
-        selectedDB       = "";
-        defaultRegion    = "";
-        unificationLevel = IWDS_UNIFICATION_NONE;
-        tomlCfg          = {
-            {         "fontCfg",         FONTCFG_DEFAULT},
-            {   "queryFontSize",  QUERY_FONTSIZE_DEFAULT},
-            {  "resultFontSize", RESULT_FONTSIZE_DEFAULT},
-            {      "selectedDB",                      ""},
-            {   "defaultRegion",                      ""},
-            {"unificationLevel",                  "none"},
+        selectedDB                = "";
+        defaultRegion             = "";
+        localeSuffixFallbackOrder = "";
+        unificationLevel          = IWDS_UNIFICATION_NONE;
+        tomlCfg                   = {
+            {                  "fontCfg",         FONTCFG_DEFAULT},
+            {            "queryFontSize",  QUERY_FONTSIZE_DEFAULT},
+            {           "resultFontSize", RESULT_FONTSIZE_DEFAULT},
+            {               "selectedDB",                      ""},
+            {            "defaultRegion",                      ""},
+            {"localeSuffixFallbackOrder",                      ""},
+            {         "unificationLevel",                  "none"},
         };
         std::ofstream outputCfg("./db/config.toml");
         outputCfg << tomlCfg;
@@ -278,6 +281,7 @@ void IDSui::ReadConfigFile() {
     resultFontSize                          = toml::find_or<int>(tomlCfg, "resultFontSize", RESULT_FONTSIZE_DEFAULT);
     selectedDB                              = toml::find_or<std::string>(tomlCfg, "selectedDB", "");
     defaultRegion                           = toml::find_or<std::string>(tomlCfg, "defaultRegion", "");
+    localeSuffixFallbackOrder               = toml::find_or<std::string>(tomlCfg, "localeSuffixFallbackOrder", "");
     const std::string configuredUnification = toml::find_or<std::string>(tomlCfg, "unificationLevel", "none");
     if(!ParseIWDSUnificationLevel(configuredUnification, unificationLevel)) unificationLevel = IWDS_UNIFICATION_NONE;
 }
@@ -285,9 +289,10 @@ void IDSui::ReadConfigFile() {
 void IDSui::WriteConfigFile() {
     tomlCfg["fontCfg"]       = fontCfg;
     tomlCfg["queryFontSize"] = queryFontSize, tomlCfg["resultFontSize"] = resultFontSize;
-    tomlCfg["selectedDB"]       = selectedDB;
-    tomlCfg["defaultRegion"]    = defaultRegion;
-    tomlCfg["unificationLevel"] = IWDSUnificationLevelName(unificationLevel);
+    tomlCfg["selectedDB"]                = selectedDB;
+    tomlCfg["defaultRegion"]             = defaultRegion;
+    tomlCfg["localeSuffixFallbackOrder"] = localeSuffixFallbackOrder;
+    tomlCfg["unificationLevel"]          = IWDSUnificationLevelName(unificationLevel);
     std::ofstream outputCfg("./db/config.toml");
     outputCfg << tomlCfg;
     outputCfg.close();
@@ -295,7 +300,7 @@ void IDSui::WriteConfigFile() {
 
 void IDSui::onQuery() {
     if(idsdb->isEmpty()) {
-        const std::string &error = idsdb->GetLastError();
+        const std::string& error = idsdb->GetLastError();
         statusBar.push(error.empty() ? "Empty database. Please import a database before querying." : error);
         resultBuf->set_text("");
         equivalentQueryLabel.set_text("");
@@ -351,7 +356,7 @@ void IDSui::RunQueryTask() {
         } else {
             const std::vector<std::string> equivalentQueries = idsdb->GetEquivalentQueries(queryIDS.get());
             equivalentMessage                                = u8"";
-            for(const std::string &equivalentQuery: equivalentQueries)
+            for(const std::string& equivalentQuery: equivalentQueries)
                 equivalentMessage += equivalentQuery + (equivalentQuery == equivalentQueries.back() ? "" : ", ");
             message        = "Querying...";
             const auto tic = std::chrono::system_clock::now();
@@ -359,7 +364,7 @@ void IDSui::RunQueryTask() {
                 resultDetails_ = idsdb->MatchDetailed(queryIDS.get(), pendingQueryOptions_);
                 result.clear();
                 result.reserve(resultDetails_.size());
-                for(const IDSMatchDetail &detail: resultDetails_)
+                for(const IDSMatchDetail& detail: resultDetails_)
                     result.push_back(detail.glyph);
             } else {
                 result = idsdb->MatchQuery(queryIDS.get(), pendingQueryOptions_);
@@ -371,7 +376,7 @@ void IDSui::RunQueryTask() {
                 " found. Matching time: " + std::to_string(queryTime.count()) + "ms.";
             std::sort(result.begin(), result.end(), IdeographCmp);
         }
-    } catch(const std::exception &e) {
+    } catch(const std::exception& e) {
         result.clear();
         resultDetails_.clear();
         message = std::string("Query failed: ") + e.what();
@@ -398,7 +403,7 @@ void IDSui::onQueryFinished() {
         message           = result_message_;
         equivalentMessage = equivalentQueryMessage_;
         if(pendingShowDetails_) {
-            for(const IDSMatchDetail &detail: resultDetails_) {
+            for(const IDSMatchDetail& detail: resultDetails_) {
                 resultStr += detail.glyph.toString() + "\tkind=" + IDSMatchKindName(detail.matchKind) +
                     "\tsource=" + IDSMatchSourceName(detail.matchSource) +
                     "\tpreprocess=" + PreprocessRulesText(detail) + "\n";
@@ -407,7 +412,7 @@ void IDSui::onQueryFinished() {
                 resultStr += "  raw: " + detail.rawIDS + "\n";
             }
         } else {
-            for(const auto &ideograph: result)
+            for(const auto& ideograph: result)
                 resultStr += ideograph.toString() + " ";
         }
     }
@@ -436,6 +441,7 @@ IDSqueryOptions IDSui::GetQueryOptions() const {
         options.filter.resultFilter = IDS_RESULT_IGNORE_LC_SUFFIX;
     else if(rbFilterLocale.get_active())
         options.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES;
+    ParseLocaleSuffixFallbackOrder(localeSuffixFallbackOrder, options.filter.localeSuffixFallbackOrder);
     ParseIDSglyphDomain(std::string(cbGlyphDomain.get_active_id()), options.filter.glyphDomain);
     options.filter.unicodeBlocks = selectedUnicodeBlocks_;
     return options;
@@ -561,6 +567,7 @@ void IDSui::onMenuDatabase() {
     if(result == Gtk::RESPONSE_OK) {
         std::unique_ptr<IDSdatabase> newDB(new IDSdatabase(selectedDB));
         newDB->config.fuzzyMatch.unificationLevel = unificationLevel;
+        ParseLocaleSuffixFallbackOrder(localeSuffixFallbackOrder, newDB->config.fuzzyMatch.localeSuffixFallbackOrder);
         newDB->config.fuzzyMatch.defaultRegion    = defaultRegion;
         // std::cout << "Read OK" << std::endl;
         idsdb = std::move(newDB);
@@ -575,7 +582,8 @@ void IDSui::onMenuSettings() {
 
     Gtk::Box dbBox(Gtk::ORIENTATION_VERTICAL), findFBox(Gtk::ORIENTATION_VERTICAL),
         displayFBox(Gtk::ORIENTATION_VERTICAL), defaultRegionBox(Gtk::ORIENTATION_HORIZONTAL),
-        querySizeBox(Gtk::ORIENTATION_HORIZONTAL), resultSizeBox(Gtk::ORIENTATION_HORIZONTAL);
+        localeSuffixOrderBox(Gtk::ORIENTATION_HORIZONTAL), querySizeBox(Gtk::ORIENTATION_HORIZONTAL),
+        resultSizeBox(Gtk::ORIENTATION_HORIZONTAL);
     dialog->set_default_size(512, -1);
     dialog->get_content_area()->pack_start(dbBox, Gtk::PACK_EXPAND_WIDGET);
     Gtk::Button    cancel("Cancel"), ok("OK");
@@ -586,15 +594,16 @@ void IDSui::onMenuSettings() {
     buttonBox.set_layout(Gtk::BUTTONBOX_END);
     Gtk::Frame       findFrame("Querying Settings"), displayFrame("Display Settings");
     Gtk::CheckButton symFallback("Character fallback"), suffixRisAltForm("Suffix \"r\" is an alternate ideograph");
-    Gtk::Entry       defaultRegion, fontCfg;
+    Gtk::Entry       defaultRegion, localeSuffixOrder, fontCfg;
     Gtk::SpinButton  querySize, resultSize;
     Glib::RefPtr<Gtk::Adjustment> queryAdj, resultAdj;
-    Gtk::Label defaultRegionLabel("Default glyphs' region: "),
-      queryLabel("Font size in query box"),
-      resultLabel("Font size in result box"),
-      fontLabel("Fonts used for display Han ideographs:\n"
-                "More than 1 font can be selected, "
-                "making a fallback sequence separated by comma.");
+    Gtk::Label      defaultRegionLabel("Default glyphs' region: "),
+        localeSuffixOrderLabel("Locale suffix fallback order (>, = same level, . = no suffix): "),
+        queryLabel("Font size in query box"),
+        resultLabel("Font size in result box"),
+        fontLabel("Fonts used for display Han ideographs:\n"
+            "More than 1 font can be selected, "
+            "making a fallback sequence separated by comma.");
     dbBox.pack_start(findFrame, Gtk::PACK_SHRINK);
     dbBox.pack_start(displayFrame);
     findFrame.add(findFBox);
@@ -604,6 +613,9 @@ void IDSui::onMenuSettings() {
     findFBox.pack_start(defaultRegionBox, Gtk::PACK_SHRINK);
     defaultRegionBox.pack_start(defaultRegionLabel, Gtk::PACK_SHRINK);
     defaultRegionBox.pack_start(defaultRegion, Gtk::PACK_SHRINK);
+    findFBox.pack_start(localeSuffixOrderBox, Gtk::PACK_SHRINK);
+    localeSuffixOrderBox.pack_start(localeSuffixOrderLabel, Gtk::PACK_SHRINK);
+    localeSuffixOrderBox.pack_start(localeSuffixOrder, Gtk::PACK_SHRINK);
     displayFBox.pack_start(querySizeBox, Gtk::PACK_SHRINK);
     displayFBox.pack_start(resultSizeBox, Gtk::PACK_SHRINK);
     displayFBox.pack_start(fontLabel, Gtk::PACK_SHRINK);
@@ -618,6 +630,7 @@ void IDSui::onMenuSettings() {
     resultSize.set_adjustment(resultAdj);
     symFallback.set_active(idsdb->config.misc.symFallback);
     suffixRisAltForm.set_active(idsdb->config.misc.suffixRisAltForm);
+    localeSuffixOrder.set_text(this->localeSuffixFallbackOrder);
     defaultRegion.set_text(idsdb->config.fuzzyMatch.defaultRegion);
     fontLabel.set_line_wrap();
     fontLabel.set_justify(Gtk::JUSTIFY_LEFT);
@@ -632,11 +645,19 @@ void IDSui::onMenuSettings() {
     ok.signal_clicked().connect([dialog]() { dialog->response(Gtk::RESPONSE_OK); });
     int result = dialog->run();
     if(result == Gtk::RESPONSE_OK) {
-        IDSdbConfig &activeConfig             = idsdb->config;
+        std::vector<std::string> parsedLocaleOrder;
+        if(!ParseLocaleSuffixFallbackOrder(localeSuffixOrder.get_text(), parsedLocaleOrder)) {
+            statusBar.push("Invalid locale suffix fallback order.");
+            delete dialog;
+            return;
+        }
+        IDSdbConfig& activeConfig             = idsdb->config;
         activeConfig.misc.symFallback         = symFallback.get_active();
         activeConfig.misc.suffixRisAltForm    = suffixRisAltForm.get_active();
         this->defaultRegion                   = defaultRegion.get_text();
+        this->localeSuffixFallbackOrder       = localeSuffixOrder.get_text();
         activeConfig.fuzzyMatch.defaultRegion = this->defaultRegion;
+        activeConfig.fuzzyMatch.localeSuffixFallbackOrder = parsedLocaleOrder;
         queryFontSize                         = querySize.get_value();
         resultFontSize                        = resultSize.get_value();
         this->fontCfg                         = fontCfg.get_text();
@@ -659,20 +680,14 @@ void IDSui::onMenuAbout() {
     Gtk::Label  about;
     auto        now         = std::chrono::system_clock::now();
     std::time_t now_c       = std::chrono::system_clock::to_time_t(now);
-    std::tm    *local_time  = std::localtime(&now_c);
+    std::tm*    local_time  = std::localtime(&now_c);
     auto        currentYear = local_time->tm_year + 1900;
-    about.set_markup(
-      "Han Ideograph Finder, Version " VERSION "\n"
-      "Copyright 2026-" +
-      std::to_string(currentYear) +
-      " Takushun Wu. Licensed under the Apache License, Version 2.0.\n"
-      "\n"
-      "<a href=\"https://github.com/takushun-wu/\" title=\"GitHub: "
-      "takushun-wu\">My GitHub Homepage</a>\n"
-      "\n"
-      "Some ideographs are displayed as a tofu? \nTry <a "
-      "href=\"https://github.com/takushun-wu/WenJinMincho\" title=\"Click to "
-      "open the GitHub repo of WenJin Mincho\">WenJin Mincho</a>!");
+    about.set_markup("Han Ideograph Finder, Version " VERSION "\n"
+        "Copyright 2026-" + std::to_string(currentYear) + " Takushun Wu. Licensed under the Apache License, Version 2.0.\n"
+        "\n"
+        "<a href=\"https://github.com/takushun-wu/\" title=\"GitHub: takushun-wu\">My GitHub Homepage</a>\n"
+        "\n"
+        "Some ideographs are displayed as a tofu? \nTry <a href=\"https://github.com/takushun-wu/WenJinMincho\" title=\"Click to open the GitHub repo of WenJin Mincho\">WenJin Mincho</a>!");
     // about.set_line_wrap();
     about.set_xalign(0.0);
     about.set_yalign(0.0);
@@ -748,14 +763,14 @@ ShowDialog:
         try {
             const int importResult = parseDB->ImportDB(filename, selectedMode);
             if(importResult != 0) {
-                const std::string &error       = parseDB->GetLastError();
+                const std::string& error       = parseDB->GetLastError();
                 std::string        importError = error.empty() ? "Unable to import the IDS database." : error;
                 if(parseDB->GetLastImportReport().HasIssues())
                     importError += "\n" + parseDB->GetLastImportReport().Summary();
                 r5label.set_text(importError);
                 goto ShowDialog;
             }
-        } catch(const std::exception &e) {
+        } catch(const std::exception& e) {
             r5label.set_text(e.what());
             goto ShowDialog;
         }
@@ -764,7 +779,7 @@ ShowDialog:
             goto ShowDialog;
         }
 
-        const IDSimportReport &report = parseDB->GetLastImportReport();
+        const IDSimportReport& report = parseDB->GetLastImportReport();
         if(report.HasIssues() || report.cacheTruncations != 0) {
             Gtk::MessageDialog warning(*dialog, "The database was imported with diagnostics.", false,
                 Gtk::MESSAGE_WARNING, Gtk::BUTTONS_OK, true);
@@ -809,7 +824,7 @@ void IDSui::onSelectPrivateDBfile(bool replaceExisting) {
     const int         importResult = replaceExisting ? idsdb->ReimportPrivateDB(fileDialog.get_filename(), formatType)
                                                      : idsdb->ImportPrivateDB(fileDialog.get_filename(), formatType);
     if(importResult != 0) {
-        const std::string &errorText   = idsdb->GetLastError();
+        const std::string& errorText   = idsdb->GetLastError();
         std::string        importError = errorText.empty() ? "The private IDS source was rejected." : errorText;
         if(idsdb->GetLastImportReport().HasIssues()) importError += "\n" + idsdb->GetLastImportReport().Summary();
         Gtk::MessageDialog error(
@@ -854,6 +869,6 @@ void IDSui::onSelectDBfileDialog() {
     }
 }
 
-bool IDSui::onDBdialogDeleted(GdkEventAny *event) {
+bool IDSui::onDBdialogDeleted(GdkEventAny* event) {
     return false;
 }

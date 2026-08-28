@@ -389,6 +389,8 @@ int main(int argc, char** argv) {
         "default-region", po::value<std::string>()->default_value(""),
         "Fallback glyph region/suffix used when an exact component glyph is unavailable.")(
         "ignore-overlay", "Ignore candidates whose matching path uses an overlay structure.")(
+        "locale-suffix-order", po::value<std::string>()->default_value(""),
+        "Locale suffix fallback order; use > for fallback and = for same-level suffixes, for example C=G>.=H.")(
         "no-match-paths", "Do not calculate match paths in detailed output.")("result-filter",
         po::value<std::string>()->default_value("all"),
         "all, ignore-lc-suffix, or ignore-other-locales.")("glyph-domain",
@@ -499,7 +501,13 @@ int main(int argc, char** argv) {
 
     if(hasInspect) {
         IDSdatabase database(databaseName);
+        std::vector<std::string> inspectLocaleOrder;
+        if(!ParseLocaleSuffixFallbackOrder(values["locale-suffix-order"].as<std::string>(), inspectLocaleOrder)) {
+            std::cerr << "Invalid --locale-suffix-order value: " << values["locale-suffix-order"].as<std::string>() << std::endl;
+            return 2;
+        }
         database.config.fuzzyMatch.defaultRegion = values["default-region"].as<std::string>();
+        database.config.fuzzyMatch.localeSuffixFallbackOrder = inspectLocaleOrder;
         if(database.isEmpty()) {
             const std::string& error = database.GetLastError();
             std::cerr << (error.empty() ? "Database is empty or unavailable." : error) << std::endl;
@@ -543,6 +551,11 @@ int main(int argc, char** argv) {
     }
 
     IWDSUnificationLevel unificationLevel = IWDS_UNIFICATION_NONE;
+    const std::string localeSuffixOrderValue = values["locale-suffix-order"].as<std::string>();
+    if(!ParseLocaleSuffixFallbackOrder(localeSuffixOrderValue, queryOptions.filter.localeSuffixFallbackOrder)) {
+        std::cerr << "Invalid --locale-suffix-order value: " << localeSuffixOrderValue << std::endl;
+        return 2;
+    }
     const std::string    unificationValue = values["unification-level"].as<std::string>();
     if(!ParseIWDSUnificationLevel(unificationValue, unificationLevel)) {
         std::cerr << "Invalid --unification-level value: " << unificationValue << std::endl;
@@ -552,6 +565,7 @@ int main(int argc, char** argv) {
     IDSdatabase database(databaseName);
     database.config.fuzzyMatch.defaultRegion    = values["default-region"].as<std::string>();
     database.config.fuzzyMatch.unificationLevel = unificationLevel;
+    database.config.fuzzyMatch.localeSuffixFallbackOrder = queryOptions.filter.localeSuffixFallbackOrder;
     if(database.isEmpty()) {
         const std::string& error = database.GetLastError();
         std::cerr << (error.empty() ? "Database is empty or unavailable." : error) << std::endl;

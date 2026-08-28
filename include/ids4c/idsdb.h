@@ -30,6 +30,10 @@ typedef enum { IDSDB_DEFAULT, IDSDB_YIBAI } IDSdbFormat;
 
 typedef enum { IDS_RESULT_ALL, IDS_RESULT_IGNORE_LC_SUFFIX, IDS_RESULT_IGNORE_OTHER_LOCALES } IDSresultFilter;
 
+// 解析地区后缀回退顺序；'>' 表示下一级，'=' 表示同级，例如 C=G>.=H；"." 表示无后缀。
+// 顺序由上层程序提供，不在数据库或库内部写死。
+bool ParseLocaleSuffixFallbackOrder(const std::string& value, std::vector<std::string>& order);
+
 // IWDS 汉字统合的严格程度；目前只实现 SourceCodeSeparation。
 typedef enum {
     IWDS_UNIFICATION_NONE,
@@ -51,6 +55,8 @@ typedef enum {
     IDS_PREPROCESS_IWDS_SOURCE_CODE_SEPARATION,
     IDS_PREPROCESS_IWDS_LV1_COMPONENT,
     IDS_PREPROCESS_IWDS_LV2_COMPONENT,
+    // Derived cache that ignores lowercase stroke suffixes when composing components.
+    IDS_PREPROCESS_STROKE_NEUTRAL_COMPOSITION,
 } IDSPreprocessRule;
 
 const char* IDSPreprocessRuleName(IDSPreprocessRule rule);
@@ -70,6 +76,7 @@ typedef enum {
     IDS_MATCH_SOURCE_NONE,
     IDS_MATCH_SOURCE_RAW_IDS,
     IDS_MATCH_SOURCE_HV_CACHE,
+    IDS_MATCH_SOURCE_STROKE_NEUTRAL_CACHE,
 } IDSMatchSource;
 
 const char* IDSMatchSourceName(IDSMatchSource source);
@@ -136,6 +143,10 @@ struct IDSFilterOptions {
     IDSglyphDomain               glyphDomain            = IDS_GLYPH_DOMAIN_ALL;
     std::vector<IDSunicodeBlock> unicodeBlocks;
     std::vector<std::string>     customRanges;
+    // 仅在 IDS_RESULT_IGNORE_OTHER_LOCALES 下生效；未列出的后缀排在已列出的后缀之后。
+    // 使用 '>' 表示回退到下一级，使用 '=' 表示同一级，例如 C=G>.=H。
+    // 由于历史 API 使用 vector，解析后的同级组以一个字符串保存，如 {"C=G", ".=H"}。
+    std::vector<std::string>     localeSuffixFallbackOrder;
 };
 
 typedef struct {
@@ -190,7 +201,15 @@ typedef struct {
 /// IWDS 和 YiBai 模糊匹配配置。
 struct IDSFuzzyMatchOptions {
     IWDSUnificationLevel unificationLevel = IWDS_UNIFICATION_NONE;
+    // Use the derived cache that treats lowercase stroke suffixes as neutral.
+    // Raw and HV definitions remain unchanged.
+    bool strokeNeutralComposition = true;
     std::string          defaultRegion; // YiBai 部件 fallback 区域。
+    // 可选的 FindIDS 地区后缀回退顺序；为空时保持现有 lv0/传统回退行为。
+    // '>' 表示回退到下一级，'=' 表示同一级；无后缀可写作 '.'，例如 C=G>.=H。
+    // 解析后的同级组以一个字符串保存，例如 {"C=G", ".=H"}。
+    // 直接构造 vector 时，空字符串仍表示单独一级的无后缀。
+    std::vector<std::string> localeSuffixFallbackOrder;
 };
 
 /// 与具体模糊等级无关的数据库选项。
@@ -238,6 +257,9 @@ typedef struct {
     std::vector<std::string> glyphs;
     std::string              expression; // 原始表达式，用于错误报告。
     std::string              ids;        // 实际交给 IDS 解析器的表达式。
+    // IDS.pdf 7.1 的根部唯一化分隔符，例如 {士}。为空表示没有明确区分。
+    // 自定义读取器如果在预处理时保留了该标记，可以直接填写此字段。
+    std::string              uniqueSeparator;
 } IDSImportRecord;
 
 using IDSImportRecordCallback = std::function<bool(const IDSImportRecord& record)>;
@@ -253,6 +275,8 @@ using IDSImportReader         = std::function<bool(
 class IDSdatabase {
 private:
     using IDSStorage       = std::unordered_map<Ideograph, IDSOwnerList, Ideograph_Hash>;
+    // 与每个字形的原始 IDS 按 ordinal 对齐；空字符串表示该 IDS 没有 7.1 唯一化标记。
+    using IDSUniqueSeparatorStorage = std::unordered_map<Ideograph, std::vector<std::string>, Ideograph_Hash>;
     using IdeographSet     = std::unordered_set<Ideograph, Ideograph_Hash>;
     struct StrokeCountRange {
         uint32_t minimum = 0;
@@ -263,6 +287,8 @@ private:
     struct SameIDSHashGroup {
         std::string            expression;
         std::vector<Ideograph> glyphs;
+        // 仅记录明确写成 {字} 的字形；同一表达式组中的其他字形仍可能互认。
+        IdeographSet           notEquivalentGlyphs;
     };
     using SameIDSHashIndex = std::unordered_map<uint64_t, std::vector<SameIDSHashGroup>>;
     // 一个字形可以有多个原始 IDS；集合之间不做传递合并。
@@ -270,7 +296,11 @@ private:
 
     // 原始 IDS 是可追溯的 lv0 基线，笔画数也只从这里推导。
     IDSStorage _rawIDSDB;
+    // 根部 {字} 不是 IDS 树的部件；单独保存，避免与普通同式表达式自动归并。
+    IDSUniqueSeparatorStorage _rawIDSUniqueSeparators;
     // 查询缓存保存每条原始 IDS 的一个或多个 HV 展开候选。
+    // Derived cache used only by matching and component search, never by FindIDS/HV extraction.
+    IDSStorage _strokeNeutralCompositionDB;
     IDSStorage _idsDB;
     // 标记可被增量更新的私有扩展字形，基础 IDS 不可被私有导入覆盖。
     IdeographSet                                              _privateGlyphs;
@@ -344,17 +374,21 @@ private:
     StrokeCountRange GetStrokeRange(IDS* ids);
     bool             HasDisjointStrokeRange(IDS* candidate, IDS* query);
     bool             MatchStrokeCount(IDS* ids, SearchParam* query);
-    bool           AddRawIDS(Ideograph ideo, IDSOwner ids);
+    bool           AddRawIDS(Ideograph ideo, IDSOwner ids, std::string uniqueSeparator = "");
     void           BuildSameIDSHashIndex();
     IDSOwnerList ExpandSameIDSQuery(IDS* ids, size_t maximum = 64);
     void           ResetRuntimeCaches();
+    bool           IsHVAmbiguousOrigin(Ideograph glyph) const;
     bool           BuildQueryCacheFromRaw();
     void           BuildQueryCacheForGlyphs(const IdeographSet& glyphs, IDSStorage& output);
+    void           BuildStrokeNeutralCompositionCacheForGlyphs(const IdeographSet& glyphs, IDSStorage& output);
     void           CollectReferencedIdeographs(IDS* ids, IdeographSet& references) const;
     IdeographSet   FindAffectedCacheGlyphs(const IdeographSet& changedGlyphs) const;
     void           RebuildAffectedQueryCache(const IdeographSet& changedGlyphs);
-    bool           ParseIDSFile(const std::string& filename, IDSdbFormat dbformat, IDSStorage& output);
-    bool           ParseIDSReader(const IDSImportReader& reader, IDSStorage& output);
+    bool           ParseIDSFile(const std::string& filename, IDSdbFormat dbformat, IDSStorage& output,
+        IDSUniqueSeparatorStorage& uniqueSeparators);
+    bool           ParseIDSReader(const IDSImportReader& reader, IDSStorage& output,
+        IDSUniqueSeparatorStorage& uniqueSeparators);
     int            ImportPrivateDBImpl(IDSImportReader reader, IDSdbFormat dbformat, bool replaceExisting);
     IDSOwnerList   HVExtractAlternativesInternal(
         IDS* ids, bool firstLayer, bool preserveAmbiguousGlyphs, size_t maximum, bool& truncated);

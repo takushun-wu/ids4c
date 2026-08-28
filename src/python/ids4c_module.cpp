@@ -39,6 +39,8 @@ public:
 
     std::string text() const { return node_->toString(); }
 
+    std::string unique_separator() const { return node_->GetUniqueSeparator(); }
+
     std::string kind() const {
         switch(node_->GetType()) {
         case IDS_STROKE:       return "stroke";
@@ -407,7 +409,8 @@ PYBIND11_MODULE(ids4c, module) {
         .def_readwrite("result_filter", &IDSFilterOptions::resultFilter)
         .def_readwrite("glyph_domain", &IDSFilterOptions::glyphDomain)
         .def_readwrite("unicode_blocks", &IDSFilterOptions::unicodeBlocks)
-        .def_readwrite("custom_ranges", &IDSFilterOptions::customRanges);
+        .def_readwrite("custom_ranges", &IDSFilterOptions::customRanges)
+        .def_readwrite("locale_suffix_fallback_order", &IDSFilterOptions::localeSuffixFallbackOrder);
 
     py::class_<IDSqueryOptions>(module, "QueryOptions")
         .def(py::init<>())
@@ -417,7 +420,9 @@ PYBIND11_MODULE(ids4c, module) {
     py::class_<IDSFuzzyMatchOptions>(module, "FuzzyMatchOptions")
         .def(py::init<>())
         .def_readwrite("unification_level", &IDSFuzzyMatchOptions::unificationLevel)
-        .def_readwrite("default_region", &IDSFuzzyMatchOptions::defaultRegion);
+        .def_readwrite("default_region", &IDSFuzzyMatchOptions::defaultRegion)
+        .def_readwrite("stroke_neutral_composition", &IDSFuzzyMatchOptions::strokeNeutralComposition)
+        .def_readwrite("locale_suffix_fallback_order", &IDSFuzzyMatchOptions::localeSuffixFallbackOrder);
 
     py::class_<IDSMiscOptions>(module, "MiscOptions")
         .def(py::init<>())
@@ -432,6 +437,7 @@ PYBIND11_MODULE(ids4c, module) {
 
     py::class_<IDSNodeHandle>(module, "IDSNode")
         .def_property_readonly("kind", &IDSNodeHandle::kind)
+        .def_property_readonly("unique_separator", &IDSNodeHandle::unique_separator)
         .def_property_readonly("text", &IDSNodeHandle::text)
         .def_property_readonly("idc", &IDSNodeHandle::idc)
         .def_property_readonly("idc_type", &IDSNodeHandle::idc_type)

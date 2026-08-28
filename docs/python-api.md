@@ -175,6 +175,7 @@ FilterOptions:
 - unicode_blocks: one or more UnicodeBlock values;
 - custom_ranges: names of registered custom ranges.
 
+The current Python binding can select ranges registered by the host application, but does not yet expose range registration.
 Available enums include ResultFilter, GlyphDomain, UnicodeBlock, IWDSUnificationLevel, and DatabaseFormat.
 
 ## Detailed results
@@ -243,6 +244,7 @@ config.fuzzy_match.unification_level = (
     ids4c.IWDSUnificationLevel.SOURCE_CODE_SEPARATION
 )
 config.fuzzy_match.default_region = "G"
+config.fuzzy_match.stroke_neutral_composition = True
 config.misc.enable_cache = True
 config.misc.sym_fallback = True
 config.misc.suffix_is_alt_form = False
@@ -273,6 +275,9 @@ database.import_private_file(
 
 Import failures raise RuntimeError. Read database.last_error and database.last_import_report for the latest error and structured diagnostics.
 
+`last_import_report` is a dictionary containing fields such as `input_lines`, `data_lines`, `source_expressions`, `accepted_expressions`, `rejected_expressions`, `query_cache_entries`, `rebuilt_cache_glyphs`, `cache_truncations`, and `issues`. Each item in `issues` includes `line`, `ids_index`, `character_index`, `glyph`, `expression`, and `message`, which can be used to display the exact import location.
+
+After import, the database builds the HV cache and stroke-neutral composition cache from the raw IDS. `raw_ids()` returns original definitions, while `ids()` returns query-cache entries. To regenerate derived data from the raw definitions, reimport the database or use the C++ API `RebuildQueryCache()`.
 ## Ownership and threading
 
 - IDSNode objects and database-returned objects own their data;

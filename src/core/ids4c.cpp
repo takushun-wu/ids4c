@@ -322,8 +322,9 @@ bool SearchExpression::operator==(const SearchExpression& search) const {
 }
 
 Pattern::Pattern(IDCtype idc, std::vector<IDS*> pids, size_t preferSplitPoint, int* overlayRange,
-    std::vector<std::string> overlayType, int optionalInt) {
+    std::vector<std::string> overlayType, int optionalInt, std::vector<HVOriginRange> hvOriginRanges) {
     _type = IDS_PATTERN;
+    _hvOriginRanges = std::move(hvOriginRanges);
     _idc = idc, _optionalInt = optionalInt;
     if(IDCargs[_idc] != SIZE_MAX) _pids.reserve(IDCargs[_idc]);
     for(size_t i = 0; i < IDCargs[_idc] && i < pids.size(); i++)
@@ -338,6 +339,7 @@ Pattern::Pattern(IDCtype idc, std::vector<IDS*> pids, size_t preferSplitPoint, i
 Pattern::Pattern(const Pattern& pattern) {
     _type = IDS_PATTERN;
     _idc = pattern._idc, _optionalInt = pattern._optionalInt;
+    _hvOriginRanges = pattern._hvOriginRanges;
     _preferSplitPoint = pattern._preferSplitPoint;
     _overlayType      = pattern._overlayType;
     for(const auto& i: pattern._pids)
@@ -350,7 +352,8 @@ Pattern::Pattern(Pattern&& pattern) noexcept:
     _pids(std::move(pattern._pids)),
     _preferSplitPoint(pattern._preferSplitPoint),
     _overlayType(std::move(pattern._overlayType)),
-    _optionalInt(pattern._optionalInt) {
+    _optionalInt(pattern._optionalInt),
+    _hvOriginRanges(std::move(pattern._hvOriginRanges)) {
     _overlayRange[0] = pattern._overlayRange[0];
     _overlayRange[1] = pattern._overlayRange[1];
 }
@@ -361,6 +364,7 @@ Pattern& Pattern::operator=(const Pattern& pattern) {
     _type             = IDS_PATTERN;
     _idc              = pattern._idc;
     _optionalInt      = pattern._optionalInt;
+    _hvOriginRanges   = pattern._hvOriginRanges;
     _preferSplitPoint = pattern._preferSplitPoint;
     _overlayType      = pattern._overlayType;
     _overlayRange[0]  = pattern._overlayRange[0];
@@ -380,6 +384,7 @@ Pattern& Pattern::operator=(Pattern&& pattern) noexcept {
     _overlayRange[1]  = pattern._overlayRange[1];
     _overlayType      = std::move(pattern._overlayType);
     _optionalInt      = pattern._optionalInt;
+    _hvOriginRanges   = std::move(pattern._hvOriginRanges);
     return *this;
 }
 
@@ -406,13 +411,23 @@ std::string Pattern::toString() const {
         }
         out += "]";
     }
-    if(_idc == IDC_HORIZONAL_ARRANGE || _idc == IDC_VERTICAL_ARRANGE) out += "(";
+    const bool isArrange = _idc == IDC_HORIZONAL_ARRANGE || _idc == IDC_VERTICAL_ARRANGE;
+    if(isArrange && !_hvOriginRanges.empty()) {
+        out += "[";
+        for(size_t index = 0; index < _hvOriginRanges.size(); index++) {
+            if(index != 0) out += ",";
+            out += _hvOriginRanges[index].glyph + "=" + std::to_string(_hvOriginRanges[index].first) + ":" +
+                std::to_string(_hvOriginRanges[index].last);
+        }
+        out += "]";
+    }
+    if(isArrange) out += "(";
     if(_idc != IDC_OVERLAY && _optionalInt != 0) out += "[" + std::to_string(_optionalInt) + "]";
     for(size_t i = 0; i < _pids.size(); i++) {
         out += _pids[i]->toString();
-        if((_idc == IDC_HORIZONAL_ARRANGE || _idc == IDC_VERTICAL_ARRANGE) && i == _preferSplitPoint) out += "|";
+        if(isArrange && i == _preferSplitPoint) out += "|";
     }
-    if(_idc == IDC_HORIZONAL_ARRANGE || _idc == IDC_VERTICAL_ARRANGE) out += ")";
+    if(isArrange) out += ")";
     return out;
 }
 
@@ -454,6 +469,12 @@ int Pattern::GetOptionalInt() const {
 
 bool Pattern::operator==(const Pattern& pattern) {
     if(_idc != pattern._idc || _pids.size() != pattern._pids.size()) return false;
+    if(_hvOriginRanges.size() != pattern._hvOriginRanges.size()) return false;
+    for(size_t index = 0; index < _hvOriginRanges.size(); index++)
+        if(_hvOriginRanges[index].glyph != pattern._hvOriginRanges[index].glyph ||
+            _hvOriginRanges[index].first != pattern._hvOriginRanges[index].first ||
+            _hvOriginRanges[index].last != pattern._hvOriginRanges[index].last)
+            return false;
     for(size_t i = 0; i < _pids.size(); i++) {
         if(_pids[i]->GetType() != pattern._pids[i]->GetType()) return false;
         if(_pids[i]->GetType() == IDS_IDEOGRAPH &&
@@ -902,6 +923,36 @@ static bool ParseVariableToken(const std::string& token, std::string& name) {
     return true;
 }
 
+static bool ParseHVOriginRangeToken(const std::string& token, std::vector<HVOriginRange>& ranges) {
+    if(token.size() < 2 || token.front() != '[' || token.back() != ']') return false;
+    const std::string content = token.substr(1, token.size() - 2);
+    if(content.empty()) return true;
+    for(const std::string& item: StringSplit(content, U',')) {
+        const size_t equal = item.find('=');
+        const size_t colon = equal == std::string::npos ? std::string::npos : item.find(':', equal + 1);
+        if(equal == std::string::npos || colon == std::string::npos || equal == 0 || colon <= equal + 1 ||
+            colon + 1 >= item.size())
+            return false;
+        HVOriginRange range;
+        range.glyph = item.substr(0, equal);
+        try {
+            size_t firstConsumed = 0;
+            size_t lastConsumed  = 0;
+            const unsigned long long first = std::stoull(item.substr(equal + 1, colon - equal - 1), &firstConsumed);
+            const unsigned long long last  = std::stoull(item.substr(colon + 1), &lastConsumed);
+            if(firstConsumed != colon - equal - 1 || lastConsumed != item.size() - colon - 1 ||
+                first > last || first > std::numeric_limits<size_t>::max() ||
+                last > std::numeric_limits<size_t>::max())
+                return false;
+            range.first = static_cast<size_t>(first);
+            range.last  = static_cast<size_t>(last);
+        } catch(const std::exception&) {
+            return false;
+        }
+        ranges.push_back(std::move(range));
+    }
+    return true;
+}
 IDSOwner ParseIDSOwned(std::string ids) {
     return ParseIDSOwned(std::move(ids), nullptr);
 }
@@ -962,6 +1013,7 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
     size_t                                    searchExpressionIndex = 0;
     std::u32string                            strBuffer             = U"";
     bool                                      YBdisrepeat           = false;
+    std::string                               rootUniqueSeparator;
     bool   strokeMode = false, strokeUpper = false, strokeNeg = false, strokeCross = false;
     bool   bracketMode  = false;
     size_t strokeDepth  = 0;
@@ -1020,6 +1072,9 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
         }
         // Curly at the beginning of IDS
         else if(idsU32[i] == U'{' && i == 0) {
+            const size_t closing = idsU32.find(U'}', i + 1);
+            if(closing != std::u32string::npos && closing + 1 < idsU32.size())
+                rootUniqueSeparator = utf8::utf32to8(idsU32.substr(i, closing - i + 1));
             YBdisrepeat = true;
             continue;
         } else if(YBdisrepeat) {
@@ -1207,6 +1262,7 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
         } else if(IDCchar2type(tokens[i]) == IDC_HORIZONAL_ARRANGE || IDCchar2type(tokens[i]) == IDC_VERTICAL_ARRANGE) {
             RETURN_NULLPTR_IF_STACK_IS_EMPTY(stack, i);
             size_t preferSplit = -1;
+            bool   arrangementOpenParenSeen = false;
             while(!(
                 stack.top()->GetType() == IDS_PARSINGTOKEN && ((_ParsingToken*)stack.top().get())->GetToken() == ")")) {
                 RETURN_NULLPTR_IF_STACK_IS_EMPTY(stack, i);
@@ -1217,17 +1273,60 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                         preferSplit = pids.size() - 1;
                         temp.reset();
                     } else if(temp->GetType() == IDS_PARSINGTOKEN) {
-                        pids.push_back(IDSOwner(new Ideograph(((_ParsingToken*)temp.get())->GetToken())));
-                        temp.reset();
+                        const std::string token = ((_ParsingToken*)temp.get())->GetToken();
+                        if(!token.empty() && token.front() == '[' && pids.empty()) {
+                            if(arrangementOpenParenSeen) {
+                                bool numericOptional = false;
+                                if(token.size() >= 3 && token.back() == ']') {
+                                    try {
+                                        size_t consumed = 0;
+                                        std::stoi(token.substr(1, token.size() - 2), &consumed);
+                                        numericOptional = consumed == token.size() - 2;
+                                    } catch(const std::exception&) {}
+                                }
+                                if(!numericOptional) {
+                                    SetIDSParseError(parseError, idsU32, tokenPositions[i],
+                                        "HV origin range must precede '('");
+                                    return IDSOwner();
+                                }
+                            }
+                            pids.push_back(std::move(temp));
+                        } else
+                            pids.push_back(IDSOwner(new Ideograph(token)));
                     } else
                         pids.push_back(std::move(temp));
                 } else
+                {
+                    arrangementOpenParenSeen = true;
                     temp.reset();
+                }
             }
             RETURN_NULLPTR_IF_STACK_IS_EMPTY(stack, i);
+            int arrangeOptionalInt = 0;
+            std::vector<HVOriginRange> hvOriginRanges;
+            // 排列结构的方括号参数在反向解析时会先进入 pids，不能再从 ) 后的栈顶读取。
+            if(!pids.empty() && pids.front()->GetType() == IDS_PARSINGTOKEN &&
+                !((_ParsingToken*)pids.front().get())->GetToken().empty() &&
+                ((_ParsingToken*)pids.front().get())->GetToken().front() == '[') {
+                temp = std::move(pids.front());
+                pids.erase(pids.begin());
+                const std::string optional = ((_ParsingToken*)temp.get())->GetToken();
+                if(!ParseHVOriginRangeToken(optional, hvOriginRanges)) {
+                    const std::string value = optional.substr(1, optional.size() - 2);
+                    try {
+                        size_t consumed = 0;
+                        arrangeOptionalInt = std::stoi(value, &consumed);
+                        if(consumed != value.size()) throw std::invalid_argument("not an integer");
+                    } catch(const std::exception&) {
+                        SetIDSParseError(parseError, idsU32, tokenPositions[i], "invalid HV origin range");
+                        return IDSOwner();
+                    }
+                }
+            }
             stack.pop(); // )
             std::vector<IDS*> pidsRaw = BorrowIDS(pids);
-            stack.push(IDSOwner(new Pattern(IDCchar2type(tokens[i]), pidsRaw, preferSplit)));
+            stack.push(IDSOwner(new Pattern(IDCchar2type(tokens[i]), pidsRaw, preferSplit, nullptr, {},
+                arrangeOptionalInt, std::move(hvOriginRanges))));
         } else if(IDCchar2type(tokens[i]) != IDC_UNKNOWN) {
             int                      ocType = 0;
             std::string              optional;
@@ -1341,12 +1440,14 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
         stack.pop();
         while(!stack.empty())
             stack.pop();
+        temp->SetUniqueSeparator(rootUniqueSeparator);
         return temp;
     }
     temp = std::move(stack.top());
     stack.pop();
     while(!stack.empty())
         stack.pop();
+    temp->SetUniqueSeparator(rootUniqueSeparator);
     return temp;
 }
 
@@ -1412,6 +1513,8 @@ IDS* ParseIDS(std::string ids) {
     return ParseIDSOwned(ids).release();
 }
 bool IDSequal(IDS* ids1, IDS* ids2) {
+    if(ids1 == nullptr || ids2 == nullptr) return false;
+    if(ids1->GetUniqueSeparator() != ids2->GetUniqueSeparator()) return false;
     if(ids1->GetType() == IDS_IDEOGRAPH && ids2->GetType() == IDS_IDEOGRAPH)
         return *(Ideograph*)ids1 == *(Ideograph*)ids2;
     if(ids1->GetType() == IDS_STROKE && ids2->GetType() == IDS_STROKE) return *(Stroke*)ids1 == *(Stroke*)ids2;
@@ -1430,4 +1533,12 @@ bool IDSequal(IDS* ids1, IDS* ids2) {
 
 Ideograph Ideograph::GetPured(void) const {
     return this->inUnicode() ? Ideograph(this->GetIdeo()) : Ideograph(this->GetAbstractName());
+}
+
+const std::vector<HVOriginRange>& Pattern::GetHVOriginRanges() const {
+    return _hvOriginRanges;
+}
+
+void Pattern::SetHVOriginRanges(std::vector<HVOriginRange> ranges) {
+    _hvOriginRanges = std::move(ranges);
 }

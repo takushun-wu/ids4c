@@ -8,6 +8,20 @@
 
 namespace {
 
+    // 提取 IDS.pdf 7.1 的根部唯一化分隔符；普通部件中的 {抽象名} 不属于此标记。
+    static std::string ExtractLeadingUniqueSeparator(const std::string& expression) {
+        std::u32string expressionU32;
+        try {
+            expressionU32 = utf8::utf8to32(expression);
+        } catch(const std::exception&) {
+            return "";
+        }
+        if(expressionU32.size() < 3 || expressionU32.front() != U'{') return "";
+        const size_t closing = expressionU32.find(U'}', 1);
+        if(closing == std::u32string::npos || closing + 1 >= expressionU32.size()) return "";
+        return utf8::utf32to8(expressionU32.substr(0, closing + 1));
+    }
+
     static IDSImportRecord MakeInvalidTextRecord(size_t lineNumber, const std::string& line) {
         IDSImportRecord record;
         record.line       = lineNumber;
@@ -17,6 +31,23 @@ namespace {
 
     static bool EmitRecord(const IDSImportRecordCallback& emit, const IDSImportRecord& record) {
         return !emit || emit(record);
+    }
+
+    // 统一支持 LF、CRLF 和旧式 Macintosh 使用的单独 CR 换行，且保持流式读取。
+    static bool ReadTextLine(std::istream& file, std::string& line) {
+        line.clear();
+        bool hasCharacter = false;
+        char character = 0;
+        while(file.get(character)) {
+            hasCharacter = true;
+            if(character == '\n') return true;
+            if(character == '\r') {
+                if(file.peek() == '\n') file.get();
+                return true;
+            }
+            line.push_back(character);
+        }
+        return hasCharacter;
     }
 
     static bool ReadTextIDS(
@@ -30,9 +61,8 @@ namespace {
         std::string              line;
         std::vector<std::string> lineSplited, lineSplited2, jSuffixSplit;
         size_t                   lineNumber = 0;
-        while(std::getline(file, line)) {
+        while(ReadTextLine(file, line)) {
             lineNumber++;
-            if(!line.empty() && line.back() == '\r') line.pop_back();
             if(line.empty()) continue;
 
             std::u32string lineU32;
@@ -130,7 +160,8 @@ IDSImportReader MakeTextIDSReader(const std::string& filename, IDSdbFormat dbfor
     };
 }
 
-bool IDSdatabase::ParseIDSReader(const IDSImportReader& reader, IDSStorage& output) {
+bool IDSdatabase::ParseIDSReader(
+    const IDSImportReader& reader, IDSStorage& output, IDSUniqueSeparatorStorage& uniqueSeparators) {
     if(!reader) {
         _lastError = "The IDS import reader is empty.";
         return false;
@@ -163,6 +194,9 @@ bool IDSdatabase::ParseIDSReader(const IDSImportReader& reader, IDSStorage& outp
         const std::string expression = record.expression.empty() ? record.ids : record.expression;
         const std::string parseText  = record.ids.empty() ? record.expression : record.ids;
         const std::string firstGlyph = record.glyphs.empty() ? "" : record.glyphs.front();
+        const std::string uniqueSeparator = record.uniqueSeparator.empty()
+            ? ExtractLeadingUniqueSeparator(parseText)
+            : record.uniqueSeparator;
 
         if(record.glyphs.empty()) {
             addIssue(record.line, 0, "", expression,
@@ -193,6 +227,7 @@ bool IDSdatabase::ParseIDSReader(const IDSImportReader& reader, IDSStorage& outp
             IDSOwner entry = parsed->Clone();
             if(entry == nullptr) continue;
             output[Ideograph(glyphName)].push_back(std::move(entry));
+            uniqueSeparators[Ideograph(glyphName)].push_back(uniqueSeparator);
             accepted = true;
         }
         if(accepted)
@@ -224,6 +259,7 @@ bool IDSdatabase::ParseIDSReader(const IDSImportReader& reader, IDSStorage& outp
     return true;
 }
 
-bool IDSdatabase::ParseIDSFile(const std::string& filename, IDSdbFormat dbformat, IDSStorage& output) {
-    return ParseIDSReader(MakeTextIDSReader(filename, dbformat), output);
+bool IDSdatabase::ParseIDSFile(const std::string& filename, IDSdbFormat dbformat, IDSStorage& output,
+    IDSUniqueSeparatorStorage& uniqueSeparators) {
+    return ParseIDSReader(MakeTextIDSReader(filename, dbformat), output, uniqueSeparators);
 }

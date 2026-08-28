@@ -175,6 +175,7 @@ FilterOptions：
 - unicode_blocks：一个或多个 UnicodeBlock；
 - custom_ranges：已注册的自定义范围名称。
 
+当前 Python binding 可以选择已由宿主程序注册的范围，但尚未暴露注册自定义范围的接口。
 可用枚举包括 ResultFilter、GlyphDomain、UnicodeBlock、IWDSUnificationLevel 和 DatabaseFormat。
 
 ## 详细结果
@@ -243,6 +244,7 @@ config.fuzzy_match.unification_level = (
     ids4c.IWDSUnificationLevel.SOURCE_CODE_SEPARATION
 )
 config.fuzzy_match.default_region = "G"
+config.fuzzy_match.stroke_neutral_composition = True
 config.misc.enable_cache = True
 config.misc.sym_fallback = True
 config.misc.suffix_is_alt_form = False
@@ -273,6 +275,9 @@ database.import_private_file(
 
 导入失败时抛出 RuntimeError。错误信息和结构化报告可通过 database.last_error 和 database.last_import_report 获取。
 
+`last_import_report` 是一个字典，主要字段包括：`input_lines`、`data_lines`、`source_expressions`、`accepted_expressions`、`rejected_expressions`、`query_cache_entries`、`rebuilt_cache_glyphs`、`cache_truncations` 和 `issues`。`issues` 中的每项包含 `line`、`ids_index`、`character_index`、`glyph`、`expression` 和 `message`，适合显示导入错误位置。
+
+导入完成后，数据库会从原始 IDS 生成 HV 缓存和笔画中性组合缓存。`raw_ids()` 返回原始定义，`ids()` 返回查询缓存；需要从原始定义重新生成派生缓存时，建议重新导入数据库或使用 C++ API 的 `RebuildQueryCache()`。
 ## 对象和线程
 
 - IDSNode 和数据库返回对象拥有自己的数据；

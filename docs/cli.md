@@ -42,6 +42,7 @@ GLYPH can be an actual character, U+XXXX, 0xXXXX, or an abstract glyph name.
 | --- | --- | --- |
 | --unification-level | none, srcseparation, lv1, lv2 | IWDS fuzzy-unification level |
 | --default-region | Region string | Fallback region or suffix when an exact component glyph is unavailable |
+| --locale-suffix-order | `>` and `=` separated suffix list | Set locale-suffix fallback order; `.` means no suffix |
 | --result-filter | all, ignore-lc-suffix, ignore-other-locales | Result suffix and locale filtering |
 | --glyph-domain | all, unicode, private, abstract | Glyph-domain filter |
 | --unicode-block | Comma-separated | Unicode-block filter |
@@ -113,6 +114,11 @@ Replace existing private IDS entries:
 
 Import failures report the source line, IDS index, character position, and other diagnostics when available.
 
+### Caches after import
+
+A successful IDS import builds the HV query cache and the stroke-neutral composition cache from the raw expressions. Raw IDS and derived caches are stored in the same SQLite database; the caches should not be edited manually. Adding or reimporting private data incrementally updates the affected glyphs.
+
+If a database was generated from a new `ids_lv0.txt`, or if its derived data no longer matches the source file, reimport the database. The C++ API also provides `RebuildQueryCache()` to rebuild derived data from the raw IDS currently loaded in the database. The import report contains accepted expressions, cache entries, cache truncations, and detailed issues.
 ## Query examples
 
 Basic structural query:

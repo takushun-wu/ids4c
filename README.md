@@ -35,6 +35,8 @@ The project source code is licensed under the Apache License, Version 2.0; see [
 - Unicode-block, private-use, abstract-glyph, and custom-range filtering;
 - Detailed match paths, equivalent-query indexes, and preprocessing-rule information.
 
+When IDS data is imported, ids4c keeps both the original IDS expressions and derived query caches. The HVExtract cache is used by structural and component queries; the stroke-neutral composition cache allows components with lowercase stroke suffixes to participate in composition lookup without changing the data returned by `raw_ids()`. Reimporting private data or rebuilding the cache regenerates these derived caches from the raw IDS.
+
 ### IWDS fuzzy unification
 
 Database queries can use the following IWDS unification levels:

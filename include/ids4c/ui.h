@@ -12,7 +12,7 @@
 
 #include "ids4c/idsdb.h"
 
-#define VERSION "0.1.0"
+#define VERSION "0.2.0"
 
 #define FONTCFG_DEFAULT         "WenJin Mincho Plane 0,WenJin Mincho Plane 2,WenJin Mincho Plane 3"
 #define QUERY_FONTSIZE_DEFAULT  16
@@ -44,23 +44,23 @@ protected:
     Gtk::TextView                 resultBox;
     Glib::RefPtr<Gtk::TextBuffer> resultBuf;
 
-    Gtk::MenuBar            menuBar;
-    Gtk::MenuItem           menuItemFile, menuItemHelp;
-    Gtk::Menu               menuFile, menuHelp;
-    Gtk::MenuItem           menuItemFileDatabase, menuItemFileSettings, menuItemFileExit;
-    Gtk::MenuItem           menuItemHelpAbout;
-    Gtk::Statusbar          statusBar;
-    Gtk::RadioButton::Group rgFilter;
-    Gtk::RadioButton        rbFilterAll, rbFilterLcSuffix, rbFilterLocale;
-    Gtk::CheckButton        cbIgnoreOverlay, cbShowDetails, cbTrackMatchPaths;
-    Gtk::Label              labelGlyphDomain, labelUnicodeBlock;
-    Gtk::ComboBoxText       cbGlyphDomain;
-    Gtk::Button              unicodeBlockButton;
-    Gtk::Label              labelUnification;
-    Gtk::Label              equivalentQueryLabel;
-    Gtk::Label              equivalentUILabel;
-    Gtk::ComboBoxText       cbUnification;
-    IWDSUnificationLevel    unificationLevel = IWDS_UNIFICATION_NONE;
+    Gtk::MenuBar                 menuBar;
+    Gtk::MenuItem                menuItemFile, menuItemHelp;
+    Gtk::Menu                    menuFile, menuHelp;
+    Gtk::MenuItem                menuItemFileDatabase, menuItemFileSettings, menuItemFileExit;
+    Gtk::MenuItem                menuItemHelpAbout;
+    Gtk::Statusbar               statusBar;
+    Gtk::RadioButton::Group      rgFilter;
+    Gtk::RadioButton             rbFilterAll, rbFilterLcSuffix, rbFilterLocale;
+    Gtk::CheckButton             cbIgnoreOverlay, cbShowDetails, cbTrackMatchPaths;
+    Gtk::Label                   labelGlyphDomain, labelUnicodeBlock;
+    Gtk::ComboBoxText            cbGlyphDomain;
+    Gtk::Button                  unicodeBlockButton;
+    Gtk::Label                   labelUnification;
+    Gtk::Label                   equivalentQueryLabel;
+    Gtk::Label                   equivalentUILabel;
+    Gtk::ComboBoxText            cbUnification;
+    IWDSUnificationLevel         unificationLevel = IWDS_UNIFICATION_NONE;
     std::vector<IDSunicodeBlock> selectedUnicodeBlocks_;
 
     Gtk::TreeView                dbList;
@@ -74,6 +74,7 @@ protected:
 
     std::string fontCfg;
     std::string defaultRegion;
+    std::string localeSuffixFallbackOrder;
     unsigned    queryFontSize, resultFontSize;
     toml::value tomlCfg;
 

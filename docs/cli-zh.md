@@ -42,6 +42,7 @@ GLYPH 可以是实际字符、U+XXXX、0xXXXX 或抽象字形名。
 | --- | --- | --- |
 | --unification-level | none、srcseparation、lv1、lv2 | IWDS 模糊统合等级 |
 | --default-region | 区域字符串 | 精确部件字形不存在时使用的默认区域/后缀 |
+| --locale-suffix-order | `>`、`=` 分隔的后缀列表 | 指定地区后缀的回退顺序；`.` 表示无后缀 |
 | --result-filter | all、ignore-lc-suffix、ignore-other-locales | 结果后缀和区域筛选 |
 | --glyph-domain | all、unicode、private、abstract | 字形域筛选 |
 | --unicode-block | 逗号分隔 | Unicode 区块筛选 |
@@ -113,6 +114,11 @@ New-Item -ItemType Directory -Force db
 
 导入失败时，CLI 会输出错误信息以及输入行、IDS 序号和字符位置等诊断信息。
 
+### 导入后的缓存
+
+IDS 导入成功后会从原始表达式生成 HV 查询缓存和笔画中性组合缓存。原始 IDS 与派生缓存都写入同一个 SQLite 数据库；缓存不应手工编辑。私有库追加或重新导入时，受影响字形的缓存会增量更新。
+
+如果原始数据库来自新的 `ids_lv0.txt` 或者缓存内容与输入文件不一致，可以重新导入数据库；C++ API 还提供 `RebuildQueryCache()` 供上层程序从当前原始 IDS 重建缓存。导入报告会给出接受的表达式数、缓存条目数、缓存截断数以及错误列表。
 ## 查询示例
 
 基本结构查询：

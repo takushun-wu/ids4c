@@ -44,6 +44,13 @@ static std::string SQLiteColumnText(sqlite3_stmt* statement, int column) {
 }
 
 
+// SQLite 中的 raw_ids_text 保存完整的根部唯一化前缀，加载时单独提取。
+static std::string SQLiteLeadingUniqueSeparator(const std::string& expression) {
+    if(expression.size() < 4 || expression.front() != '{') return "";
+    const size_t closing = expression.find('}', 1);
+    if(closing == std::string::npos || closing <= 1 || closing + 1 >= expression.size()) return "";
+    return expression.substr(0, closing + 1);
+}
 static const char* DatabaseFormatName(IDSdbFormat format) {
     return format == IDSDB_YIBAI ? "yibai" : "default";
 }
@@ -143,6 +150,7 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
     bool        ok = true;
     std::string formatName;
     std::string schemaVersion;
+    std::string hvCacheVersion;
     {
         SQLiteStatement formatStatement(database, "SELECT value FROM metadata WHERE key = 'format'");
         SQLiteStatement schemaStatement(database, "SELECT value FROM metadata WHERE key = 'schema_version'");
@@ -155,6 +163,11 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         }
     }
 
+    if(ok) {
+        SQLiteStatement cacheVersionStatement(database, "SELECT value FROM metadata WHERE key = 'hv_cache_version'");
+        if(cacheVersionStatement.valid() && sqlite3_step(cacheVersionStatement.get()) == SQLITE_ROW)
+            hvCacheVersion = SQLiteColumnText(cacheVersionStatement.get(), 0);
+    }
     IDSdbFormat format = IDSDB_DEFAULT;
     if(ok && !ParseDatabaseFormat(formatName, format)) {
         _lastError = "Unknown database format.";
@@ -165,6 +178,7 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         ok         = false;
     }
     const bool hasPrivateGlyphTable = schemaVersion == "6" || schemaVersion == "7";
+    const bool rebuildHVCache = hvCacheVersion != "5";
 
     if(ok) {
         _rawIDSDB.clear();
@@ -184,8 +198,9 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
             while((result = sqlite3_step(rawStatement.get())) == SQLITE_ROW) {
                 const std::string glyphText = SQLiteColumnText(rawStatement.get(), 0);
                 const std::string rawText   = SQLiteColumnText(rawStatement.get(), 1);
+                const std::string uniqueSeparator = SQLiteLeadingUniqueSeparator(rawText);
                 IDSOwner          raw       = ParseIDSOwned(rawText);
-                if(raw == nullptr || !AddRawIDS(Ideograph(glyphText), std::move(raw))) {
+                if(raw == nullptr || !AddRawIDS(Ideograph(glyphText), std::move(raw), uniqueSeparator)) {
                     _lastError = "Invalid raw IDS entry for " + glyphText;
                     ok         = false;
                     break;
@@ -258,6 +273,7 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         if(!strokeStatement.valid())
             ok = false;
         else {
+
             int result = SQLITE_ROW;
             while((result = sqlite3_step(strokeStatement.get())) == SQLITE_ROW)
                 _strokeDB[SQLiteColumnText(strokeStatement.get(), 0)] =
@@ -266,6 +282,32 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         }
     }
 
+    if(ok) {
+        SQLiteStatement composedStatement(database,
+            "SELECT glyphs.glyph_key, query_stroke_neutral_entries.ids_text "
+            "FROM query_stroke_neutral_entries JOIN glyphs ON glyphs.id = query_stroke_neutral_entries.glyph_id "
+            "ORDER BY query_stroke_neutral_entries.glyph_id, query_stroke_neutral_entries.ordinal");
+        // 旧版本没有该派生表；只要稍后重建 HV 缓存即可继续迁移。
+        if(!composedStatement.valid()) {
+            if(!rebuildHVCache) {
+                _lastError = "The stroke-neutral composition cache is missing.";
+                ok = false;
+            }
+        } else {
+            int result = SQLITE_ROW;
+            while((result = sqlite3_step(composedStatement.get())) == SQLITE_ROW) {
+                const std::string glyphText = SQLiteColumnText(composedStatement.get(), 0);
+                IDSOwner cached = ParseIDSOwned(SQLiteColumnText(composedStatement.get(), 1));
+                if(cached == nullptr || ContainsQueryOnlyOperator(cached.get())) {
+                    _lastError = "Invalid stroke-neutral composition cache entry for " + glyphText;
+                    ok = false;
+                    break;
+                }
+                _strokeNeutralCompositionDB[Ideograph(glyphText)].push_back(std::move(cached));
+            }
+            if(result != SQLITE_DONE) ok = false;
+        }
+    }
     if(ok) {
         SQLiteStatement strokeCountStatement(
             database, "SELECT glyph_key, stroke_count FROM glyphs WHERE stroke_count IS NOT NULL");
@@ -279,6 +321,10 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         }
     }
     sqlite3_close(database);
+    if(ok && rebuildHVCache) {
+        if(!BuildQueryCacheFromRaw() || !SaveSqliteDatabase(filename))
+            ok = false;
+    }
     if(!ok) {
         _rawIDSDB.clear();
         ResetRuntimeCaches();
@@ -309,6 +355,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         "DROP TABLE IF EXISTS stroke_sequences;"
         // "DROP TABLE IF EXISTS iwds_subtree_index_entries;"
         // "DROP TABLE IF EXISTS iwds_subtree_index_keys;"
+        "DROP TABLE IF EXISTS query_stroke_neutral_entries;"
         "DROP TABLE IF EXISTS query_ids_entries;"
         "DROP TABLE IF EXISTS ids_same_expression;"
         "DROP TABLE IF EXISTS ids_entries;"
@@ -344,7 +391,14 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         "  expression_hash INTEGER NOT NULL,"
         "  ids_text TEXT NOT NULL,"
         "  glyph_id INTEGER NOT NULL REFERENCES glyphs(id),"
+        "  not_equivalent INTEGER NOT NULL DEFAULT 0,"
         "  PRIMARY KEY (expression_hash, ids_text, glyph_id)"
+        ");"
+        "CREATE TABLE query_stroke_neutral_entries ("
+        "  glyph_id INTEGER NOT NULL REFERENCES glyphs(id),"
+        "  ordinal INTEGER NOT NULL,"
+        "  ids_text TEXT NOT NULL,"
+        "  PRIMARY KEY (glyph_id, ordinal)"
         ");"
         "CREATE TABLE stroke_sequences ("
         "  glyph_id INTEGER PRIMARY KEY REFERENCES glyphs(id),"
@@ -352,6 +406,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         ");"
         "CREATE INDEX ids_entries_raw_ids_text_idx ON ids_entries(raw_ids_text);"
         "CREATE INDEX query_ids_entries_ids_text_idx ON query_ids_entries(ids_text);"
+        "CREATE INDEX query_stroke_neutral_entries_ids_text_idx ON query_stroke_neutral_entries(ids_text);"
         "CREATE INDEX ids_same_expression_hash_idx ON ids_same_expression(expression_hash);");
 
     if(ok) {
@@ -363,10 +418,14 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         SQLiteStatement queryStatement(
             database, "INSERT INTO query_ids_entries(glyph_id, ordinal, ids_text) VALUES(?, ?, ?)");
         SQLiteStatement sameExpressionStatement(
-            database, "INSERT INTO ids_same_expression(expression_hash, ids_text, glyph_id) VALUES(?, ?, ?)");
+            database,
+            "INSERT INTO ids_same_expression(expression_hash, ids_text, glyph_id, not_equivalent) VALUES(?, ?, ?, ?)");
+        SQLiteStatement composedStatement(
+            database, "INSERT INTO query_stroke_neutral_entries(glyph_id, ordinal, ids_text) VALUES(?, ?, ?)");
         SQLiteStatement privateStatement(database, "INSERT INTO private_glyphs(glyph_id) VALUES(?)");
         SQLiteStatement strokeStatement(database, "INSERT INTO stroke_sequences(glyph_id, sequence) VALUES(?, ?)");
         if(!metadataStatement.valid() || !glyphStatement.valid() || !rawStatement.valid() || !queryStatement.valid() ||
+            !composedStatement.valid() ||
             !sameExpressionStatement.valid() || !privateStatement.valid() || !strokeStatement.valid())
             ok = false;
 
@@ -379,6 +438,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         };
         if(ok) ok = insertMetadata("format", DatabaseFormatName(_format));
         if(ok) ok = insertMetadata("schema_version", "6");
+        if(ok) ok = insertMetadata("hv_cache_version", "5");
 
         std::unordered_map<std::string, sqlite3_int64> glyphIds;
         auto                                           ensureGlyph = [&](const Ideograph& glyph) -> sqlite3_int64 {
@@ -414,7 +474,11 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
 
             for(size_t index = 0; index < glyphEntry.second.size() && ok; index++) {
                 IDS*              ids          = glyphEntry.second[index].get();
-                const std::string idsText      = ids->toString();
+                std::string       idsText      = ids->toString();
+                const auto uniqueSeparators   = _rawIDSUniqueSeparators.find(glyphEntry.first);
+                if(uniqueSeparators != _rawIDSUniqueSeparators.end() && index < uniqueSeparators->second.size() &&
+                    !uniqueSeparators->second[index].empty())
+                    idsText = uniqueSeparators->second[index] + idsText;
                 const std::string strokeCounts = SerializeStrokeCounts(GetStrokeCounts(ids));
                 sqlite3_reset(rawStatement.get());
                 sqlite3_clear_bindings(rawStatement.get());
@@ -443,6 +507,9 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
                     sqlite3_bind_text(
                         sameExpressionStatement.get(), 2, group.expression.c_str(), -1, SQLITE_TRANSIENT);
                     sqlite3_bind_int64(sameExpressionStatement.get(), 3, glyphId);
+                    sqlite3_bind_int(
+                        sameExpressionStatement.get(), 4,
+                        group.notEquivalentGlyphs.find(glyph) != group.notEquivalentGlyphs.end() ? 1 : 0);
                     if(sqlite3_step(sameExpressionStatement.get()) != SQLITE_DONE) {
                         ok = false;
                         break;
@@ -458,7 +525,9 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
             if(glyphId <= 0) break;
 
             for(size_t index = 0; index < glyphEntry.second.size() && ok; index++) {
-                const std::string idsText = glyphEntry.second[index]->toString();
+                std::string idsText = glyphEntry.second[index]->toString();
+                if(!glyphEntry.second[index]->GetUniqueSeparator().empty())
+                    idsText = glyphEntry.second[index]->GetUniqueSeparator() + idsText;
                 sqlite3_reset(queryStatement.get());
                 sqlite3_clear_bindings(queryStatement.get());
                 sqlite3_bind_int64(queryStatement.get(), 1, glyphId);
@@ -482,6 +551,23 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
             sqlite3_bind_int64(strokeStatement.get(), 1, glyphId);
             sqlite3_bind_text(strokeStatement.get(), 2, sequence.c_str(), -1, SQLITE_TRANSIENT);
             ok = sqlite3_step(strokeStatement.get()) == SQLITE_DONE;
+        }
+        for(const auto& glyphEntry: _strokeNeutralCompositionDB) {
+            if(!ok) break;
+            const sqlite3_int64 glyphId = ensureGlyph(glyphEntry.first);
+            if(glyphId <= 0) break;
+
+            for(size_t index = 0; index < glyphEntry.second.size() && ok; index++) {
+                std::string idsText = glyphEntry.second[index]->toString();
+                if(!glyphEntry.second[index]->GetUniqueSeparator().empty())
+                    idsText = glyphEntry.second[index]->GetUniqueSeparator() + idsText;
+                sqlite3_reset(composedStatement.get());
+                sqlite3_clear_bindings(composedStatement.get());
+                sqlite3_bind_int64(composedStatement.get(), 1, glyphId);
+                sqlite3_bind_int64(composedStatement.get(), 2, static_cast<sqlite3_int64>(index));
+                sqlite3_bind_text(composedStatement.get(), 3, idsText.c_str(), -1, SQLITE_TRANSIENT);
+                ok = sqlite3_step(composedStatement.get()) == SQLITE_DONE;
+            }
         }
     }
 

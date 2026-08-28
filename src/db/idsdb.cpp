@@ -4,11 +4,119 @@
 #include "idsdb_internal.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <utility>
+
+static bool IsCodepointInUnicodeBlock(uint32_t codepoint, IDSunicodeBlock block);
+
+// 只有{汉字}是IDS.pdf 7.1的唯一化标记；{?0}到{?3}等前缀仅表示来源信息。
+static bool IsExplicitGlyphUniqueSeparator(const std::string& separator) {
+    std::u32string value;
+    try {
+        value = utf8::utf8to32(separator);
+    } catch(const std::exception&) {
+        return false;
+    }
+    if(value.size() != 3 || value.front() != U'{' || value.back() != U'}') return false;
+
+    const uint32_t codepoint = static_cast<uint32_t>(value[1]);
+    return IsCodepointInUnicodeBlock(codepoint, IDS_UNICODE_BLOCK_CJK) ||
+        IsCodepointInUnicodeBlock(codepoint, IDS_UNICODE_BLOCK_CJK_COMPATIBILITY);
+}
+bool ParseLocaleSuffixFallbackOrder(const std::string& value, std::vector<std::string>& order) {
+    order.clear();
+    if(value.empty()) return true;
+
+    size_t start = 0;
+    std::vector<std::string> seenSuffixes;
+    while(start <= value.size()) {
+        const size_t separator = value.find('>', start);
+        const size_t end       = separator == std::string::npos ? value.size() : separator;
+        size_t first           = start;
+        size_t last            = end;
+        while(first < last && std::isspace(static_cast<unsigned char>(value[first]))) ++first;
+        while(last > first && std::isspace(static_cast<unsigned char>(value[last - 1]))) --last;
+        if(first == last) {
+            order.clear();
+            return false;
+        }
+
+        const std::string groupText = value.substr(first, last - first);
+        std::vector<std::string> group;
+        size_t groupStart = 0;
+        while(groupStart <= groupText.size()) {
+            const size_t sameLevelSeparator = groupText.find('=', groupStart);
+            const size_t groupEnd = sameLevelSeparator == std::string::npos
+                ? groupText.size()
+                : sameLevelSeparator;
+            size_t suffixFirst = groupStart;
+            size_t suffixLast  = groupEnd;
+            while(suffixFirst < suffixLast &&
+                std::isspace(static_cast<unsigned char>(groupText[suffixFirst])))
+                ++suffixFirst;
+            while(suffixLast > suffixFirst &&
+                std::isspace(static_cast<unsigned char>(groupText[suffixLast - 1])))
+                --suffixLast;
+            if(suffixFirst == suffixLast) {
+                order.clear();
+                return false;
+            }
+
+            std::string suffix = groupText.substr(suffixFirst, suffixLast - suffixFirst);
+            if(suffix == ".") suffix.clear();
+            if(std::find(seenSuffixes.begin(), seenSuffixes.end(), suffix) != seenSuffixes.end()) {
+                order.clear();
+                return false;
+            }
+            seenSuffixes.push_back(suffix);
+            group.push_back(std::move(suffix));
+
+            if(sameLevelSeparator == std::string::npos) break;
+            groupStart = sameLevelSeparator + 1;
+        }
+
+        if(group.size() == 1) {
+            order.push_back(std::move(group.front()));
+        } else {
+            std::string encodedGroup;
+            for(size_t index = 0; index < group.size(); ++index) {
+                if(index != 0) encodedGroup.push_back('=');
+                encodedGroup += group[index].empty() ? "." : group[index];
+            }
+            order.push_back(std::move(encodedGroup));
+        }
+
+        if(separator == std::string::npos) break;
+        start = separator + 1;
+    }
+    return true;
+}
+
+// 将公开的扁平配置项还原为回退级别。一个元素中的 '=' 表示同级后缀。
+// 例如 {"C=G", ".=H"} 表示 C/G 同级，空后缀/H 同级。
+static std::vector<std::vector<std::string>> LocaleSuffixFallbackGroups(
+    const std::vector<std::string>& order) {
+    std::vector<std::vector<std::string>> groups;
+    for(const std::string& token: order) {
+        std::vector<std::string> group;
+        size_t start = 0;
+        while(start <= token.size()) {
+            const size_t separator = token.find('=', start);
+            const size_t end       = separator == std::string::npos ? token.size() : separator;
+            std::string suffix     = token.substr(start, end - start);
+            if(suffix == ".") suffix.clear();
+            group.push_back(std::move(suffix));
+            if(separator == std::string::npos) break;
+            start = separator + 1;
+        }
+        if(!group.empty()) groups.push_back(std::move(group));
+    }
+    return groups;
+}
 
 static void AppendBorrowedIDS(std::vector<IDS*>& out, const IDSOwnerList& ids) {
     for(const auto& i: ids)
@@ -813,12 +921,14 @@ void IDSdatabase::ResetRuntimeCaches() {
     _strokeMaximumCache.clear();
     _strokeRangeCache.clear();
     _iterStack.clear();
+    _strokeNeutralCompositionDB.clear();
     _idsDataSignature.clear();
 }
 
-bool IDSdatabase::AddRawIDS(Ideograph ideo, IDSOwner ids) {
+bool IDSdatabase::AddRawIDS(Ideograph ideo, IDSOwner ids, std::string uniqueSeparator) {
     if(ids == nullptr || ContainsQueryOnlyOperator(ids.get())) return false;
     _rawIDSDB[ideo].push_back(std::move(ids));
+    _rawIDSUniqueSeparators[ideo].push_back(std::move(uniqueSeparator));
     return true;
 }
 
@@ -828,8 +938,14 @@ void IDSdatabase::BuildSameIDSHashIndex() {
 
     SameIDSHashIndex candidates;
     for(const auto& glyphEntry: _rawIDSDB) {
-        for(const auto& ids: glyphEntry.second) {
+        const auto uniqueSeparators = _rawIDSUniqueSeparators.find(glyphEntry.first);
+        for(size_t ordinal = 0; ordinal < glyphEntry.second.size(); ordinal++) {
+            const auto& ids = glyphEntry.second[ordinal];
             if(ids == nullptr) continue;
+            const bool hasExplicitGlyphUniqueSeparator =
+                uniqueSeparators != _rawIDSUniqueSeparators.end() &&
+                ordinal < uniqueSeparators->second.size() &&
+                IsExplicitGlyphUniqueSeparator(uniqueSeparators->second[ordinal]);
             const std::string expression = ids->toString();
             const uint64_t    hash       = IDSExpressionHash(expression);
 
@@ -846,6 +962,7 @@ void IDSdatabase::BuildSameIDSHashIndex() {
                 groups.back().expression = expression;
                 group                    = &groups.back();
             }
+            if(hasExplicitGlyphUniqueSeparator) group->notEquivalentGlyphs.insert(glyphEntry.first);
 
             if(std::find(group->glyphs.begin(), group->glyphs.end(), glyphEntry.first) == group->glyphs.end())
                 group->glyphs.push_back(glyphEntry.first);
@@ -866,8 +983,10 @@ void IDSdatabase::BuildSameIDSHashIndex() {
     for(const auto& hashEntry: _sameIDSHashIndex) {
         for(const SameIDSHashGroup& group: hashEntry.second) {
             for(const Ideograph& glyph: group.glyphs) {
+                if(group.notEquivalentGlyphs.find(glyph) != group.notEquivalentGlyphs.end()) continue;
                 std::vector<Ideograph>& variants = _sameIDSVariantIndex[glyph];
                 for(const Ideograph& variant: group.glyphs) {
+                    if(group.notEquivalentGlyphs.find(variant) != group.notEquivalentGlyphs.end()) continue;
                     if(std::find(variants.begin(), variants.end(), variant) == variants.end())
                         variants.push_back(variant);
                 }
@@ -888,11 +1007,29 @@ void IDSdatabase::AppendSameIDSMatches(IDS* ids, const IDSqueryOptions& options,
     for(const SameIDSHashGroup& group: found->second) {
         if(group.expression != expression) continue;
         for(const Ideograph& glyph: group.glyphs) {
+            if(group.notEquivalentGlyphs.find(glyph) != group.notEquivalentGlyphs.end()) continue;
             if(!ShouldIncludeResult(glyph, options)) continue;
             if(options.filter.ignoreOverlayStructure && ContainsOverlay(ids)) continue;
             if(std::find(output.begin(), output.end(), glyph) == output.end()) output.push_back(glyph);
         }
     }
+}
+
+bool IDSdatabase::IsHVAmbiguousOrigin(Ideograph glyph) const {
+    const auto rawFound = _rawIDSDB.find(glyph);
+    if(rawFound == _rawIDSDB.end()) return false;
+
+    for(const IDSOwner& idsOwner: rawFound->second) {
+        if(idsOwner == nullptr) continue;
+        const std::string expression = idsOwner->toString();
+        const auto         found      = _sameIDSHashIndex.find(IDSExpressionHash(expression));
+        if(found == _sameIDSHashIndex.end()) continue;
+        for(const SameIDSHashGroup& group: found->second) {
+            if(group.notEquivalentGlyphs.empty() || group.expression != expression) continue;
+            if(std::find(group.glyphs.begin(), group.glyphs.end(), glyph) != group.glyphs.end()) return true;
+        }
+    }
+    return false;
 }
 
 IDSOwnerList IDSdatabase::ExpandSameIDSQuery(IDS* ids, size_t maximum) {
@@ -1063,6 +1200,193 @@ IDSOwnerList IDSdatabase::ExpandSameIDSQuery(IDS* ids, size_t maximum) {
     return expandNode(ids);
 }
 
+namespace {
+
+bool HasLowercaseStrokeSuffix(const Ideograph& glyph) {
+    return glyph.GetSuffix().find_first_of(ASCII_LOWERCASE) != std::string::npos;
+}
+
+IDSOwner CloneStrokeNeutralNode(IDS* value) {
+    if(value == nullptr) return nullptr;
+    // 输出缓存必须保留小写后缀；后缀中性只用于下面的比较 key。
+    if(IsIdeograph(value)) return value->Clone();
+    if(!IsPattern(value)) return value->Clone();
+
+    Pattern* pattern = AsPattern(value);
+    IDSOwnerList children;
+    std::vector<IDS*> childPointers;
+    for(const auto& child: pattern->GetpIDSRef()) {
+        children.push_back(CloneStrokeNeutralNode(child.get()));
+        childPointers.push_back(children.back().get());
+    }
+    int overlayRange[2] = {0, 0};
+    pattern->GetOverlayRange(overlayRange);
+    // HV origin ranges are intentionally omitted: they describe the source
+    // tree and are not valid after a component has been replaced.
+    return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), overlayRange,
+        pattern->GetOverlayType(), pattern->GetOptionalInt()));
+}
+
+IDSOwner CloneStrokeNeutralKeyNode(IDS* value) {
+    if(value == nullptr) return nullptr;
+    if(IsIdeograph(value)) {
+        const Ideograph glyph = *AsIdeograph(value);
+        if(!HasLowercaseStrokeSuffix(glyph)) return value->Clone();
+        if(glyph.inUnicode())
+            return IDSOwner(new Ideograph(glyph.GetIdeo(), glyph.GetVS()));
+        return IDSOwner(new Ideograph(glyph.GetAbstractName()));
+    }
+    if(!IsPattern(value)) return value->Clone();
+
+    Pattern* pattern = AsPattern(value);
+    IDSOwnerList children;
+    std::vector<IDS*> childPointers;
+    for(const auto& child: pattern->GetpIDSRef()) {
+        children.push_back(CloneStrokeNeutralKeyNode(child.get()));
+        childPointers.push_back(children.back().get());
+    }
+    int overlayRange[2] = {0, 0};
+    pattern->GetOverlayRange(overlayRange);
+    return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), overlayRange,
+        pattern->GetOverlayType(), pattern->GetOptionalInt()));
+}
+
+std::string StrokeNeutralExpression(IDS* value) {
+    IDSOwner normalized = CloneStrokeNeutralKeyNode(value);
+    return normalized == nullptr ? std::string() : normalized->toString();
+}
+
+void AppendUniqueStrokeNeutralOwner(IDSOwnerList& output, IDSOwner value, size_t maximum) {
+    if(value == nullptr || output.size() >= maximum) return;
+    const std::string expression = value->toString();
+    for(const auto& existing: output)
+        if(existing != nullptr && existing->toString() == expression) return;
+    output.push_back(std::move(value));
+}
+
+IDSOwner MakeStrokeNeutralPattern(Pattern* source, const IDSOwnerList& children) {
+    std::vector<IDS*> childPointers;
+    childPointers.reserve(children.size());
+    for(const auto& child: children) childPointers.push_back(child.get());
+    int overlayRange[2] = {0, 0};
+    source->GetOverlayRange(overlayRange);
+    return IDSOwner(new Pattern(source->GetIDC(), childPointers, source->GetPreferSplitPoint(), overlayRange,
+        source->GetOverlayType(), source->GetOptionalInt()));
+}
+
+IDSOwnerList ComposeStrokeNeutralNode(
+    IDS* value, const std::unordered_map<std::string, std::vector<Ideograph>>& componentIndex,
+    const Ideograph& targetGlyph, size_t maximum, bool allowWholePattern) {
+    IDSOwnerList output;
+    if(value == nullptr || maximum == 0) return output;
+    if(!IsPattern(value)) {
+        AppendUniqueStrokeNeutralOwner(output, CloneStrokeNeutralNode(value), maximum);
+        return output;
+    }
+
+    Pattern* pattern = AsPattern(value);
+    std::vector<IDSOwnerList> choicesByChild;
+    choicesByChild.reserve(pattern->GetpIDSRef().size());
+    for(const auto& child: pattern->GetpIDSRef()) {
+        IDSOwnerList choices = ComposeStrokeNeutralNode(child.get(), componentIndex, targetGlyph, maximum, true);
+        if(choices.empty()) return output;
+        choicesByChild.push_back(std::move(choices));
+    }
+
+    std::vector<IDSOwnerList> combinations(1);
+    for(const IDSOwnerList& choices: choicesByChild) {
+        std::vector<IDSOwnerList> next;
+        for(const auto& prefix: combinations) {
+            for(const auto& choice: choices) {
+                if(next.size() >= maximum) break;
+                IDSOwnerList combined;
+                for(const auto& item: prefix) combined.push_back(item->Clone());
+                combined.push_back(choice->Clone());
+                next.push_back(std::move(combined));
+            }
+            if(next.size() >= maximum) break;
+        }
+        combinations = std::move(next);
+        if(combinations.empty()) return output;
+    }
+
+    for(const IDSOwnerList& children: combinations) {
+        bool unchanged = children.size() == pattern->GetpIDSRef().size();
+        if(unchanged) {
+            for(size_t index = 0; index < children.size(); index++) {
+                if(children[index] == nullptr ||
+                    children[index]->toString() != pattern->GetpIDSRef()[index]->toString()) {
+                    unchanged = false;
+                    break;
+                }
+            }
+        }
+        // 没有替换任何子树时保留原 HVOriginRange；它可能包含 IDS.pdf 7.1 的唯一化边界。
+        IDSOwner composed = unchanged ? value->Clone() : MakeStrokeNeutralPattern(pattern, children);
+        const std::string key = allowWholePattern ? StrokeNeutralExpression(composed.get()) : std::string();
+        AppendUniqueStrokeNeutralOwner(output, std::move(composed), maximum);
+
+        if(!allowWholePattern) continue;
+        const auto found = componentIndex.find(key);
+        if(found == componentIndex.end()) continue;
+        for(const Ideograph& component: found->second) {
+            // Never fold the whole target expression back into its owner glyph.
+            if(component == targetGlyph) continue;
+            AppendUniqueStrokeNeutralOwner(output, IDSOwner(new Ideograph(component)), maximum);
+        }
+    }
+    return output;
+}
+
+} // namespace
+
+void IDSdatabase::BuildStrokeNeutralCompositionCacheForGlyphs(
+    const IdeographSet& glyphs, IDSStorage& output) {
+    output.clear();
+    std::unordered_map<std::string, std::vector<Ideograph>> componentIndex;
+
+    // Index only suffixless glyphs. Locale variants and lowercase stroke
+    // variants remain available in the exact/HV cache instead of becoming
+    // ambiguous component names here.
+    for(const auto& entry: _rawIDSDB) {
+        if(!entry.first.GetSuffix().empty()) continue;
+        const auto separators = _rawIDSUniqueSeparators.find(entry.first);
+        bool hasExplicitSeparator = false;
+        if(separators != _rawIDSUniqueSeparators.end()) {
+            for(const std::string& separator: separators->second)
+                if(IsExplicitGlyphUniqueSeparator(separator)) {
+                    hasExplicitSeparator = true;
+                    break;
+                }
+        }
+        if(hasExplicitSeparator) continue;
+        for(const auto& ids: entry.second) {
+            if(!IsPattern(ids.get())) continue;
+            const std::string key = StrokeNeutralExpression(ids.get());
+            if(key.empty()) continue;
+            std::vector<Ideograph>& candidates = componentIndex[key];
+            if(std::find(candidates.begin(), candidates.end(), entry.first) == candidates.end())
+                candidates.push_back(entry.first);
+        }
+    }
+
+    for(const Ideograph& glyph: glyphs) {
+        const auto cached = _idsDB.find(glyph);
+        if(cached == _idsDB.end()) continue;
+        IDSOwnerList& composedEntries = output[glyph];
+        for(const auto& source: cached->second) {
+            IDSOwnerList alternatives = ComposeStrokeNeutralNode(source.get(), componentIndex, glyph, 64, false);
+            for(auto& alternative: alternatives) {
+                if(alternative == nullptr || alternative->toString() == source->toString()) continue;
+                alternative->SetUniqueSeparator(source->GetUniqueSeparator());
+                bool ignored = false;
+                AppendUniqueOwned(composedEntries, std::move(alternative), std::numeric_limits<size_t>::max(), ignored);
+            }
+        }
+        if(composedEntries.empty()) output.erase(glyph);
+    }
+}
+
 void IDSdatabase::BuildQueryCacheForGlyphs(const IdeographSet& glyphs, IDSStorage& output) {
     for(const Ideograph& glyph: glyphs) {
         const auto rawEntries = _rawIDSDB.find(glyph);
@@ -1070,12 +1394,19 @@ void IDSdatabase::BuildQueryCacheForGlyphs(const IdeographSet& glyphs, IDSStorag
 
         IDSOwnerList& cachedEntries = output[glyph];
         _lastImportReport.rebuiltCacheGlyphs++;
-        for(const auto& rawIds: rawEntries->second) {
+        const auto uniqueSeparators = _rawIDSUniqueSeparators.find(glyph);
+        for(size_t ordinal = 0; ordinal < rawEntries->second.size(); ordinal++) {
+            const auto& rawIds = rawEntries->second[ordinal];
+            const std::string uniqueSeparator =
+                uniqueSeparators != _rawIDSUniqueSeparators.end() && ordinal < uniqueSeparators->second.size()
+                    ? uniqueSeparators->second[ordinal]
+                    : "";
             bool         truncated    = false;
             IDSOwnerList alternatives = HVExtractOwned(rawIds.get(), true, false, 64, &truncated);
             if(alternatives.empty()) alternatives.push_back(rawIds->Clone());
             if(truncated) _lastImportReport.cacheTruncations++;
             for(auto& alternative: alternatives) {
+                if(!uniqueSeparator.empty()) alternative->SetUniqueSeparator(uniqueSeparator);
                 bool ignored = false;
                 if(AppendUniqueOwned(
                        cachedEntries, std::move(alternative), std::numeric_limits<size_t>::max(), ignored))
@@ -1112,6 +1443,8 @@ bool IDSdatabase::BuildQueryCacheFromRaw() {
     _idsDB = std::move(queryCache);
     _iterStack.clear();
     MakeCache();
+    _strokeNeutralCompositionDB.clear();
+    BuildStrokeNeutralCompositionCacheForGlyphs(allGlyphs, _strokeNeutralCompositionDB);
     return true;
 }
 
@@ -1187,6 +1520,18 @@ void IDSdatabase::RebuildAffectedQueryCache(const IdeographSet& changedGlyphs) {
     }
     _iterStack.clear();
     MakeCache();
+
+    IDSStorage previousComposed = std::move(_strokeNeutralCompositionDB);
+    IDSStorage refreshedComposed;
+    BuildStrokeNeutralCompositionCacheForGlyphs(affectedGlyphs, refreshedComposed);
+    _strokeNeutralCompositionDB = std::move(previousComposed);
+    for(const Ideograph& glyph: affectedGlyphs) {
+        const auto refreshed = refreshedComposed.find(glyph);
+        if(refreshed == refreshedComposed.end())
+            _strokeNeutralCompositionDB.erase(glyph);
+        else
+            _strokeNeutralCompositionDB[glyph] = std::move(refreshed->second);
+    }
 }
 
 int IDSdatabase::ImportDB(std::string filename, IDSdbFormat dbformat) {
@@ -1201,7 +1546,7 @@ int IDSdatabase::ImportDB(IDSImportReader reader, IDSdbFormat dbformat) {
     _format = dbformat;
     ConfigureDatabaseFormat(config, _format);
 
-    if(!ParseIDSReader(reader, _rawIDSDB)) return -1;
+    if(!ParseIDSReader(reader, _rawIDSDB, _rawIDSUniqueSeparators)) return -1;
     if(_rawIDSDB.empty()) {
         _lastError = "No valid IDS expressions were imported.";
         return -1;
@@ -1240,7 +1585,8 @@ int IDSdatabase::ImportPrivateDBImpl(IDSImportReader reader, IDSdbFormat dbforma
     _lastImportReport = IDSimportReport();
     _lastError.clear();
     IDSStorage privateEntries;
-    if(!ParseIDSReader(reader, privateEntries)) return -1;
+    IDSUniqueSeparatorStorage privateUniqueSeparators;
+    if(!ParseIDSReader(reader, privateEntries, privateUniqueSeparators)) return -1;
     if(_lastImportReport.HasIssues() || _lastImportReport.rejectedExpressions != 0) {
         _lastError = "Private IDS import was rejected; no database changes were written.";
         return -1;
@@ -1272,6 +1618,7 @@ int IDSdatabase::ImportPrivateDBImpl(IDSImportReader reader, IDSdbFormat dbforma
         for(const Ideograph& glyph: _privateGlyphs) {
             changedGlyphs.insert(glyph);
             _rawIDSDB.erase(glyph);
+            _rawIDSUniqueSeparators.erase(glyph);
         }
         _privateGlyphs.clear();
     }
@@ -1279,6 +1626,7 @@ int IDSdatabase::ImportPrivateDBImpl(IDSImportReader reader, IDSdbFormat dbforma
     for(auto& entry: privateEntries) {
         changedGlyphs.insert(entry.first);
         _rawIDSDB[entry.first] = std::move(entry.second);
+        _rawIDSUniqueSeparators[entry.first] = std::move(privateUniqueSeparators[entry.first]);
         _privateGlyphs.insert(entry.first);
     }
 
@@ -1336,14 +1684,33 @@ std::vector<IDS*> IDSdatabase::FindIDS(Ideograph ideo, bool ignoreSuffix, bool n
                 if(foundR != _idsDB.end()) AppendBorrowedIDS(found, foundR->second);
             }
         } else {
-            if(config.fuzzyMatch.defaultRegion != "") {
-                Ideograph pureIdeoWithRegion(ideo.GetIdeo(), 0, config.fuzzyMatch.defaultRegion);
-                auto      foundRegion = _idsDB.find(pureIdeoWithRegion);
-                if(foundRegion != _idsDB.end()) AppendBorrowedIDS(found, foundRegion->second);
+            const Ideograph pureIdeo = ideo.inUnicode() ? Ideograph(ideo.GetIdeo()) : Ideograph(ideo.GetAbstractName());
+            auto          appendSuffix = [&](const std::string& suffix) {
+                const Ideograph regionIdeo = suffix.empty()
+                    ? pureIdeo
+                    : (ideo.inUnicode() ? Ideograph(ideo.GetIdeo(), 0, suffix)
+                                        : Ideograph(ideo.GetAbstractName() + "." + suffix));
+                const auto foundRegion = _idsDB.find(regionIdeo);
+                if(foundRegion == _idsDB.end()) return false;
+                AppendBorrowedIDS(found, foundRegion->second);
+                return true;
+            };
+
+            // 有序回退是显式配置才启用的；默认仍保持 lv0 精确后缀和旧回退逻辑。
+            if(!config.fuzzyMatch.localeSuffixFallbackOrder.empty()) {
+                const auto fallbackGroups =
+                    LocaleSuffixFallbackGroups(config.fuzzyMatch.localeSuffixFallbackOrder);
+                for(const auto& group: fallbackGroups) {
+                    bool foundAtThisLevel = false;
+                    for(const std::string& suffix: group)
+                        foundAtThisLevel = appendSuffix(suffix) || foundAtThisLevel;
+                    if(foundAtThisLevel) break;
+                }
+            } else if(!config.fuzzyMatch.defaultRegion.empty()) {
+                appendSuffix(config.fuzzyMatch.defaultRegion);
             }
             if(found.empty()) {
-                Ideograph pureIdeo  = ideo.inUnicode() ? Ideograph(ideo.GetIdeo()) : Ideograph(ideo.GetAbstractName());
-                auto      foundPure = _idsDB.find(pureIdeo);
+                const auto foundPure = _idsDB.find(pureIdeo);
                 if(foundPure != _idsDB.end())
                     AppendBorrowedIDS(found, foundPure->second);
                 else if(!noFallback)
@@ -1416,9 +1783,12 @@ std::vector<Ideograph> IDSdatabase::GetSameIDSCharacters(Ideograph ideo) const {
     std::vector<Ideograph> result;
     for(const auto& hashEntry: _sameIDSHashIndex) {
         for(const SameIDSHashGroup& group: hashEntry.second) {
+            if(group.notEquivalentGlyphs.find(ideo) != group.notEquivalentGlyphs.end()) continue;
             if(std::find(group.glyphs.begin(), group.glyphs.end(), ideo) == group.glyphs.end()) continue;
             for(const Ideograph& glyph: group.glyphs)
-                if(std::find(result.begin(), result.end(), glyph) == result.end()) result.push_back(glyph);
+                if(group.notEquivalentGlyphs.find(glyph) == group.notEquivalentGlyphs.end() &&
+                    std::find(result.begin(), result.end(), glyph) == result.end())
+                    result.push_back(glyph);
         }
     }
     std::sort(result.begin(), result.end(), IdeographCmp);
@@ -1562,9 +1932,15 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
         return out;
     }
 
-    typedef std::vector<IDSOwnerList> SegmentChoices;
+    struct HVSegment {
+        IDSOwnerList               children;
+        std::vector<HVOriginRange> originRanges;
+        bool                       fromExpansion = false;
+    };
+    typedef std::vector<HVSegment> SegmentChoices;
     struct HVState {
         IDSOwnerList children;
+        std::vector<HVOriginRange> originRanges;
         size_t       firstSegmentLength = 0;
     };
 
@@ -1574,16 +1950,26 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
     std::vector<SegmentChoices> choicesByChild;
     choicesByChild.reserve(sourceChildren.size());
 
-    auto appendSegment = [&](SegmentChoices& choices, IDSOwnerList segment) {
-        for(const IDSOwnerList& existing: choices) {
-            if(existing.size() != segment.size()) continue;
+    auto appendSegment = [&](SegmentChoices& choices, HVSegment segment) {
+        for(const HVSegment& existing: choices) {
+            if(existing.children.size() != segment.children.size()) continue;
             bool equal = true;
-            for(size_t index = 0; index < existing.size(); index++)
-                if(!IDSequal(existing[index].get(), segment[index].get())) {
+            for(size_t index = 0; index < existing.children.size(); index++)
+                if(!IDSequal(existing.children[index].get(), segment.children[index].get())) {
                     equal = false;
                     break;
                 }
-            if(equal) return;
+            if(equal) {
+                if(existing.originRanges.size() != segment.originRanges.size()) continue;
+                for(size_t index = 0; index < existing.originRanges.size(); index++)
+                    if(existing.originRanges[index].glyph != segment.originRanges[index].glyph ||
+                        existing.originRanges[index].first != segment.originRanges[index].first ||
+                        existing.originRanges[index].last != segment.originRanges[index].last) {
+                        equal = false;
+                        break;
+                    }
+                if(equal) return;
+        }
         }
         if(choices.size() >= maximum) {
             truncated = true;
@@ -1592,10 +1978,12 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
         choices.push_back(std::move(segment));
     };
     auto appendSingleton = [&](SegmentChoices& choices, IDS* child) {
-        IDSOwnerList segment;
-        segment.push_back(child->Clone());
+        HVSegment segment;
+        segment.children.push_back(child->Clone());
         appendSegment(choices, std::move(segment));
     };
+    auto isAmbiguousOrigin = [&](const Ideograph& ideograph) { return IsHVAmbiguousOrigin(ideograph); };
+
 
     for(const auto& childOwner: sourceChildren) {
         IDS*           child = childOwner.get();
@@ -1609,8 +1997,8 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
                 appendSingleton(choices, child);
             } else {
                 for(const auto& alternative: alternatives) {
-                    IDSOwnerList segment;
-                    segment.push_back(alternative->Clone());
+                    HVSegment segment;
+                    segment.children.push_back(alternative->Clone());
                     appendSegment(choices, std::move(segment));
                 }
             }
@@ -1630,8 +2018,10 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
                     for(const auto& expanded: expandedAlternatives) {
                         if(!IsPattern(expanded.get()) || HVArrangementType(AsPattern(expanded.get())) != splitType)
                             continue;
-                        IDSOwnerList segment;
-                        AppendClonedOwners(segment, AsPattern(expanded.get())->GetpIDSRef());
+                        HVSegment segment;
+                        segment.fromExpansion = true;
+                        AppendClonedOwners(segment.children, AsPattern(expanded.get())->GetpIDSRef());
+                        segment.originRanges = AsPattern(expanded.get())->GetHVOriginRanges();
                         appendSegment(choices, std::move(segment));
                     }
                 }
@@ -1647,11 +2037,12 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
             IDSOwnerList alternatives =
                 HVExtractAlternativesInternal(child, false, preserveAmbiguousGlyphs, maximum, truncated);
             for(const auto& alternative: alternatives) {
-                IDSOwnerList segment;
-                if(IsPattern(alternative.get()) && HVArrangementType(AsPattern(alternative.get())) == splitType)
-                    AppendClonedOwners(segment, AsPattern(alternative.get())->GetpIDSRef());
-                else
-                    segment.push_back(alternative->Clone());
+                HVSegment segment;
+                if(IsPattern(alternative.get()) && HVArrangementType(AsPattern(alternative.get())) == splitType) {
+                    segment.originRanges = AsPattern(alternative.get())->GetHVOriginRanges();
+                    AppendClonedOwners(segment.children, AsPattern(alternative.get())->GetpIDSRef());
+                } else
+                    segment.children.push_back(alternative->Clone());
                 appendSegment(choices, std::move(segment));
             }
             if(choices.empty()) appendSingleton(choices, child);
@@ -1665,15 +2056,31 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
     for(size_t childIndex = 0; childIndex < choicesByChild.size(); childIndex++) {
         std::vector<HVState> next;
         for(const HVState& state: states) {
-            for(const IDSOwnerList& segment: choicesByChild[childIndex]) {
+            for(const HVSegment& segment: choicesByChild[childIndex]) {
                 if(next.size() >= maximum) {
                     truncated = true;
                     break;
                 }
                 HVState combined;
+                combined.originRanges = state.originRanges;
                 AppendClonedOwners(combined.children, state.children);
-                AppendClonedOwners(combined.children, segment);
-                combined.firstSegmentLength = childIndex == 0 ? segment.size() : state.firstSegmentLength;
+                const size_t segmentOffset = combined.children.size();
+                AppendClonedOwners(combined.children, segment.children);
+                for(const HVOriginRange& origin: segment.originRanges) {
+                    HVOriginRange rebased = origin;
+                    rebased.first += segmentOffset;
+                    rebased.last += segmentOffset;
+                    combined.originRanges.push_back(std::move(rebased));
+                }
+                if(segment.fromExpansion && childIndex < sourceChildren.size() &&
+                    IsIdeograph(sourceChildren[childIndex].get()) &&
+                    isAmbiguousOrigin(*AsIdeograph(sourceChildren[childIndex].get())) &&
+                    !segment.children.empty()) {
+                    HVOriginRange origin{AsIdeograph(sourceChildren[childIndex].get())->toString(), segmentOffset,
+                        segmentOffset + segment.children.size()};
+                    combined.originRanges.push_back(std::move(origin));
+                }
+                combined.firstSegmentLength = childIndex == 0 ? segment.children.size() : state.firstSegmentLength;
                 next.push_back(std::move(combined));
             }
             if(next.size() >= maximum) break;
@@ -1682,19 +2089,53 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
         if(states.empty()) return out;
     }
 
+    auto annotateAmbiguousOrigins = [&](const IDSOwnerList& children, std::vector<HVOriginRange>& ranges) {
+        auto appendRange = [&](const Ideograph& glyph, size_t first, size_t last) {
+            for(const HVOriginRange& existing: ranges)
+                if(existing.first == first && existing.last == last) return;
+            ranges.push_back(HVOriginRange{glyph.toString(), first, last});
+        };
+        for(const auto& hashEntry: _sameIDSHashIndex)
+            for(const SameIDSHashGroup& group: hashEntry.second) {
+                if(group.notEquivalentGlyphs.empty()) continue;
+                // The ordinary glyphs in a {glyph} group remain possible HV origins.
+                for(const Ideograph& originGlyph: group.glyphs) {
+                    if(group.notEquivalentGlyphs.find(originGlyph) != group.notEquivalentGlyphs.end()) continue;
+                    const auto rawFound = _rawIDSDB.find(originGlyph);
+                    if(rawFound == _rawIDSDB.end()) continue;
+                    for(const IDSOwner& raw: rawFound->second) {
+                        if(!IsPattern(raw.get()) || raw->toString() != group.expression) continue;
+                        const auto& originChildren = AsPattern(raw.get())->GetpIDSRef();
+                        if(originChildren.empty() || originChildren.size() > children.size()) continue;
+                        for(size_t first = 0; first + originChildren.size() <= children.size(); first++) {
+                            bool equal = true;
+                            for(size_t offset = 0; offset < originChildren.size(); offset++)
+                                if(!IDSequal(originChildren[offset].get(), children[first + offset].get())) {
+                                    equal = false;
+                                    break;
+                                }
+                            if(equal) appendRange(originGlyph, first, first + originChildren.size());
+                        }
+                    }
+                }
+            }
+    };
     int overlayRange[2] = {0, 0};
     pattern->GetOverlayRange(overlayRange);
     for(const HVState& state: states) {
         std::vector<IDS*> children = BorrowIDSList(state.children);
+        std::vector<HVOriginRange> originRanges = state.originRanges;
+        if(firstLayer) annotateAmbiguousOrigins(state.children, originRanges);
         IDSOwner          alternative;
         if(splitType != IDC_UNKNOWN) {
             const bool   isPrimarySplit = pattern->GetIDC() == IDC_LEFT_RIGHT || pattern->GetIDC() == IDC_ABOVE_BELOW;
             const size_t preferSplit =
                 firstLayer && isPrimarySplit && state.firstSegmentLength != 0 ? state.firstSegmentLength - 1 : SIZE_MAX;
-            alternative.reset(new Pattern(splitType, children, preferSplit, nullptr, {}, pattern->GetOptionalInt()));
+            alternative.reset(new Pattern(splitType, children, preferSplit, nullptr, {}, pattern->GetOptionalInt(),
+                originRanges));
         } else
             alternative.reset(new Pattern(pattern->GetIDC(), children, SIZE_MAX, overlayRange,
-                pattern->GetOverlayType(), pattern->GetOptionalInt()));
+                pattern->GetOverlayType(), pattern->GetOptionalInt(), pattern->GetHVOriginRanges()));
         AppendUniqueOwned(out, std::move(alternative), maximum, truncated);
     }
     return out;
@@ -2026,10 +2467,31 @@ bool IDSdatabase::ShouldIncludeResult(Ideograph ideograph, const IDSqueryOptions
     if(options.filter.resultFilter == IDS_RESULT_ALL) return true;
 
     const std::string suffix = ideograph.GetSuffix();
-    if(suffix.empty()) return true;
     if(suffix == "r" && config.misc.suffixRisAltForm) return true;
     if(suffix.find_first_of(ASCII_LOWERCASE) != std::string::npos) return false;
 
+    if(options.filter.resultFilter == IDS_RESULT_IGNORE_OTHER_LOCALES &&
+        !options.filter.localeSuffixFallbackOrder.empty()) {
+        const auto suffixVariants = _cache_IdeoSuffixLookup.find(ideograph.GetPured());
+        if(suffixVariants != _cache_IdeoSuffixLookup.end()) {
+            const auto fallbackGroups =
+                LocaleSuffixFallbackGroups(options.filter.localeSuffixFallbackOrder);
+            const auto suffixRank = [&fallbackGroups](const std::string& value) {
+                for(size_t rank = 0; rank < fallbackGroups.size(); ++rank)
+                    if(std::find(fallbackGroups[rank].begin(), fallbackGroups[rank].end(), value) !=
+                        fallbackGroups[rank].end())
+                        return rank;
+                return fallbackGroups.size();
+            };
+            const size_t currentRank = suffixRank(suffix);
+            size_t       preferredRank = fallbackGroups.size();
+            for(const auto& variant: suffixVariants->second)
+                preferredRank = std::min(preferredRank, suffixRank(variant.suffix));
+            return currentRank == preferredRank;
+        }
+    }
+
+    if(suffix.empty()) return true;
     if(options.filter.resultFilter == IDS_RESULT_IGNORE_OTHER_LOCALES &&
         suffix.find_first_of(ASCII_UPPERCASE) != std::string::npos) {
         const auto localeInfo = _cache_GlyphLocale.find(ideograph.GetPured());
@@ -2038,8 +2500,33 @@ bool IDSdatabase::ShouldIncludeResult(Ideograph ideograph, const IDSqueryOptions
     return true;
 }
 void IDSdatabase::ApplyResultFilter(std::vector<Ideograph>& result, const IDSqueryOptions& options) const {
-    std::sort(result.begin(), result.end(), IdeographCmp);
-    if(options.filter.resultFilter != IDS_RESULT_IGNORE_OTHER_LOCALES) return;
+    if(options.filter.resultFilter != IDS_RESULT_IGNORE_OTHER_LOCALES) {
+        std::sort(result.begin(), result.end(), IdeographCmp);
+        return;
+    }
+
+    const std::vector<std::string>& localeOrder = options.filter.localeSuffixFallbackOrder;
+    if(localeOrder.empty()) {
+        std::sort(result.begin(), result.end(), IdeographCmp);
+    } else {
+        const auto localeGroups = LocaleSuffixFallbackGroups(localeOrder);
+        std::sort(result.begin(), result.end(), [&localeGroups](const Ideograph& left, const Ideograph& right) {
+            if(left.GetPured() == right.GetPured()) {
+                const auto rank = [&localeGroups](const Ideograph& ideograph) {
+                    const std::string suffix = ideograph.GetSuffix();
+                    for(size_t index = 0; index < localeGroups.size(); ++index)
+                        if(std::find(localeGroups[index].begin(), localeGroups[index].end(), suffix) !=
+                            localeGroups[index].end())
+                            return index;
+                    return localeGroups.size();
+                };
+                const size_t leftRank  = rank(left);
+                const size_t rightRank = rank(right);
+                if(leftRank != rightRank) return leftRank < rightRank;
+            }
+            return IdeographCmp(left, right);
+        });
+    }
 
     std::unordered_set<Ideograph, Ideograph_Hash> seen;
     result.erase(std::remove_if(result.begin(), result.end(),
@@ -2162,9 +2649,17 @@ bool IDSdatabase::MatchesSameIDS(IDS* idsInDB, Ideograph query, bool ignoreSuffi
     return false;
 }
 
+static bool HasMatchingHVOrigin(const Pattern* candidate, const Ideograph& query);
+static bool HasForeignHVOrigin(const Pattern* candidate, const Ideograph& query);
+
 bool IDSdatabase::MatchSearchExpression(IDS* idsInDB, SearchExpression* search) {
     if(search == nullptr) return false;
     if(search->GetMode() == SEARCH_EXPRESSION_EXCEPT) return !MatchExceptTerms(idsInDB, search->GetTerms());
+    if(search->GetTerms().size() == 1 && IsIdeograph(search->GetTerms().front().get()) && IsPattern(idsInDB)) {
+        const Ideograph query = *AsIdeograph(search->GetTerms().front().get());
+        if(HasForeignHVOrigin(AsPattern(idsInDB), query) && !HasMatchingHVOrigin(AsPattern(idsInDB), query))
+            return false;
+    }
 
     const bool matched = search->GetMode() == SEARCH_EXPRESSION_ANY
         ? MatchAnyExpression(idsInDB, search)
@@ -2215,6 +2710,7 @@ bool IDSdatabase::MatchSearchTermsWithAny(IDS* idsInDB, const IDSOwnerList& term
                 for(size_t termIndex = 0; termIndex < expanded.size(); termIndex++)
                     nextTerms.push_back(termIndex == index ? alternative->Clone() : expanded[termIndex]->Clone());
 
+
                 if(MatchSearchTermsWithAny(idsInDB, nextTerms) &&
                     (exceptTerms.empty() || !MatchExceptTerms(idsInDB, exceptTerms)))
                     return true;
@@ -2258,6 +2754,22 @@ bool IDSdatabase::CanMatchIWDSShape(IDS* idsInDB, IDS* term) const {
     return false;
 }
 
+static bool HasMatchingHVOrigin(const Pattern* candidate, const Ideograph& query) {
+    if(candidate == nullptr) return false;
+    const std::string queryGlyph = query.toString();
+    for(const HVOriginRange& origin: candidate->GetHVOriginRanges())
+        if(origin.glyph == queryGlyph) return true;
+    return false;
+}
+
+static bool HasForeignHVOrigin(const Pattern* candidate, const Ideograph& query) {
+    if(candidate == nullptr) return false;
+    const std::string queryGlyph = query.toString();
+    for(const HVOriginRange& origin: candidate->GetHVOriginRanges())
+        if(origin.glyph != queryGlyph) return true;
+    return false;
+}
+
 bool IDSdatabase::MatchSearchTermCached(IDS* idsInDB, IDS* term) {
     if(idsInDB == nullptr || term == nullptr) return false;
 
@@ -2272,12 +2784,32 @@ bool IDSdatabase::MatchSearchTermCached(IDS* idsInDB, IDS* term) {
         // Search-term results must not leak IWDS internal bindings to callers.
         VariableBindingScope bindings(_variableBindings);
         _variableBindings.clear();
+        bool queryHasUniqueSeparator = false;
+        if(IsIdeograph(term)) {
+            const auto queryDefinitions = _rawIDSUniqueSeparators.find(*AsIdeograph(term));
+            if(queryDefinitions != _rawIDSUniqueSeparators.end())
+                for(const std::string& separator: queryDefinitions->second)
+                    if(!separator.empty()) {
+                        queryHasUniqueSeparator = true;
+                        break;
+                    }
+        }
 
-        if(IDSequal(idsInDB, term))
-            matched = true;
-        else
-            matched = IDSmatch(idsInDB, term);
-        if(!matched && IsIdeograph(term) && IsPattern(idsInDB)) {
+        bool blockedByForeignHVOrigin = false;
+        if(IsIdeograph(term) && IsPattern(idsInDB)) {
+            Pattern* candidatePattern = AsPattern(idsInDB);
+            const Ideograph query = *AsIdeograph(term);
+            if(HasMatchingHVOrigin(candidatePattern, query)) matched = true;
+            blockedByForeignHVOrigin = HasForeignHVOrigin(candidatePattern, query);
+        }
+        if(!matched && !blockedByForeignHVOrigin) {
+            if(IDSequal(idsInDB, term))
+                matched = true;
+            else
+                matched = IDSmatch(idsInDB, term);
+        }
+        if(!matched && !blockedByForeignHVOrigin && IsIdeograph(term) && IsPattern(idsInDB) &&
+            queryHasUniqueSeparator == !idsInDB->GetUniqueSeparator().empty()) {
             Pattern* candidatePattern = AsPattern(idsInDB);
             if(IsArrangeIDC(candidatePattern->GetIDC())) {
                 for(IDS* expansion: FindIDS(*AsIdeograph(term))) {
@@ -2308,7 +2840,20 @@ bool IDSdatabase::MatchSearchTermCached(IDS* idsInDB, IDS* term) {
                 _iterStack.erase(candidate);
             }
         } else if(!matched && IsPattern(idsInDB)) {
-            for(IDS* child: AsPattern(idsInDB)->GetpIDS()) {
+            Pattern* candidatePattern = AsPattern(idsInDB);
+            const std::string queryGlyph = IsIdeograph(term) ? AsIdeograph(term)->toString() : std::string();
+            const auto& children = candidatePattern->GetpIDSRef();
+            for(size_t childIndex = 0; childIndex < children.size(); childIndex++) {
+                if(IsIdeograph(term)) {
+                    bool skipChild = false;
+                    for(const HVOriginRange& origin: candidatePattern->GetHVOriginRanges())
+                        if(origin.glyph != queryGlyph && childIndex >= origin.first && childIndex < origin.last) {
+                            skipChild = true;
+                            break;
+                        }
+                    if(skipChild) continue;
+                }
+                IDS* child = children[childIndex].get();
                 if(MatchSearchTermCached(child, term)) {
                     matched = true;
                     break;
@@ -2453,6 +2998,20 @@ bool IDSdatabase::MatchPattern(IDS* idsInDB, IDS* ids, bool surroundEqual) {
 
     if(!IsIdeograph(ids)) return false;
 
+    const Ideograph query = *AsIdeograph(ids);
+    if(HasMatchingHVOrigin(candidate, query)) return true;
+    if(HasForeignHVOrigin(candidate, query)) return false;
+
+    bool              queryHasUniqueSeparator = false;
+    const auto        queryDefinitions        = _rawIDSUniqueSeparators.find(query);
+    if(queryDefinitions != _rawIDSUniqueSeparators.end()) {
+        for(const std::string& separator: queryDefinitions->second)
+            if(!separator.empty()) {
+                queryHasUniqueSeparator = true;
+                break;
+            }
+    }
+    if(queryHasUniqueSeparator != !idsInDB->GetUniqueSeparator().empty()) return false;
     bool              matched       = false;
     std::vector<IDS*> expandedQuery = FindIDS(*AsIdeograph(ids));
     for(auto expanded: expandedQuery) {
@@ -2699,6 +3258,15 @@ bool IDSdatabase::IDSsearch(IDS* remain, std::vector<IDS*>& terms, IDSOwner* new
                     const size_t            matchPosition     = IDSsubarray(remainingChildren, componentChildren);
                     if(matchPosition == SIZE_MAX) continue;
 
+                    bool blockedByForeignOrigin = false;
+                    const std::string queryGlyph = AsIdeograph(terms[index])->toString();
+                    for(const HVOriginRange& origin: remainPattern->GetHVOriginRanges())
+                        if(origin.glyph != queryGlyph && matchPosition < origin.last &&
+                            matchPosition + componentChildren.size() > origin.first) {
+                            blockedByForeignOrigin = true;
+                            break;
+                        }
+                    if(blockedByForeignOrigin) continue;
                     removedIndices.push_back(index);
                     componentFound = true;
                     for(size_t childIndex = componentChildren.size(); childIndex > 0; childIndex--)
@@ -4139,9 +4707,9 @@ bool IDSdatabase::BuildMatchDetailForGlyph(Ideograph glyph, IDS* query, const ID
     const auto rawFound        = _rawIDSDB.find(glyph);
     const auto cachedFound     = _idsDB.find(glyph);
     if(rawFound != _rawIDSDB.end() && !rawFound->second.empty())
-        detail.rawIDS = rawFound->second.front()->toString();
+        detail.rawIDS = rawFound->second.front()->GetUniqueSeparator() + rawFound->second.front()->toString();
     else if(cachedFound != _idsDB.end() && !cachedFound->second.empty())
-        detail.rawIDS = cachedFound->second.front()->toString();
+        detail.rawIDS = cachedFound->second.front()->GetUniqueSeparator() + cachedFound->second.front()->toString();
 
     auto queryExpressionIndex = [&](IDS* expression) {
         const auto found = equivalentIndexes.find(expression->toString());
@@ -4216,7 +4784,7 @@ bool IDSdatabase::BuildMatchDetailForGlyph(Ideograph glyph, IDS* query, const ID
             _variableBindings.clear();
             if(!IDSmatch(entry.get(), alternative.get())) continue;
 
-            detail.matchedIDS  = entry->toString();
+            detail.matchedIDS  = entry->GetUniqueSeparator() + entry->toString();
             detail.matchSource = source;
             if(IsSearchExpression(query))
                 detail.matchKind = IDS_MATCH_KIND_COMPONENT_SEARCH;
@@ -4268,6 +4836,10 @@ bool IDSdatabase::BuildMatchDetailForGlyph(Ideograph glyph, IDS* query, const ID
                 detail.matchPaths = std::move(paths);
             }
             copyPreprocessRules(alternative);
+            if(source == IDS_MATCH_SOURCE_STROKE_NEUTRAL_CACHE &&
+                std::find(detail.preprocessRules.begin(), detail.preprocessRules.end(),
+                    IDS_PREPROCESS_STROKE_NEUTRAL_COMPOSITION) == detail.preprocessRules.end())
+                detail.preprocessRules.push_back(IDS_PREPROCESS_STROKE_NEUTRAL_COMPOSITION);
             return true;
         }
         return false;
@@ -4275,6 +4847,11 @@ bool IDSdatabase::BuildMatchDetailForGlyph(Ideograph glyph, IDS* query, const ID
 
     for(const auto& alternative: alternatives) {
         if(cachedFound != _idsDB.end() && tryEntries(cachedFound->second, IDS_MATCH_SOURCE_HV_CACHE, alternative))
+            return true;
+        const auto composedFound = _strokeNeutralCompositionDB.find(glyph);
+        if(composedFound != _strokeNeutralCompositionDB.end() &&
+            config.fuzzyMatch.strokeNeutralComposition &&
+            tryEntries(composedFound->second, IDS_MATCH_SOURCE_STROKE_NEUTRAL_CACHE, alternative))
             return true;
         if(rawFound != _rawIDSDB.end() && tryEntries(rawFound->second, IDS_MATCH_SOURCE_RAW_IDS, alternative))
             return true;
@@ -4284,6 +4861,7 @@ bool IDSdatabase::BuildMatchDetailForGlyph(Ideograph glyph, IDS* query, const ID
     const auto        sameFound     = _sameIDSHashIndex.find(IDSExpressionHash(originalQuery));
     if(sameFound != _sameIDSHashIndex.end()) {
         for(const SameIDSHashGroup& group: sameFound->second) {
+            if(group.notEquivalentGlyphs.find(glyph) != group.notEquivalentGlyphs.end()) continue;
             if(group.expression != originalQuery ||
                 std::find(group.glyphs.begin(), group.glyphs.end(), glyph) == group.glyphs.end())
                 continue;
@@ -4312,7 +4890,7 @@ std::vector<Ideograph> IDSdatabase::MatchQuery(IDS* ids, const IDSqueryOptions& 
         for(const Ideograph& match: matches)
             if(std::find(out.begin(), out.end(), match) == out.end()) out.push_back(match);
     }
-    std::sort(out.begin(), out.end(), IdeographCmp);
+    ApplyResultFilter(out, options);
     return out;
 }
 
@@ -4367,6 +4945,7 @@ std::vector<Ideograph> IDSdatabase::Match(
             bool       hasEligibleIDS           = false;
             bool       excludedByTopLevelExcept = false;
             const auto rawEntries               = _rawIDSDB.find(i.first);
+            const auto composedEntries         = _strokeNeutralCompositionDB.find(i.first);
             auto       evaluateEntries          = [&](const IDSOwnerList& entries, bool matchQuery) {
                 for(const auto& j: entries) {
                     _variableBindings.clear();
@@ -4388,9 +4967,14 @@ std::vector<Ideograph> IDSdatabase::Match(
             if(topLevelExcept != nullptr) {
                 evaluateEntries(i.second, false);
                 if(rawEntries != _rawIDSDB.end()) evaluateEntries(rawEntries->second, false);
+                if(config.fuzzyMatch.strokeNeutralComposition && composedEntries != _strokeNeutralCompositionDB.end())
+                    evaluateEntries(composedEntries->second, false);
                 matched = hasEligibleIDS && !excludedByTopLevelExcept;
             } else {
                 matched = evaluateEntries(i.second, true);
+                if(!matched && config.fuzzyMatch.strokeNeutralComposition &&
+                    composedEntries != _strokeNeutralCompositionDB.end())
+                    matched = evaluateEntries(composedEntries->second, true);
             }
             if(!hasEligibleIDS) matched = false;
             if(matched) {
@@ -4432,17 +5016,38 @@ std::vector<Ideograph> IDSdatabase::Search(const IDSOwnerList& terms) {
     }
     for(const auto& entry: _idsDB) {
         _variableBindings.clear();
+        const auto composedEntries = _strokeNeutralCompositionDB.find(entry.first);
         bool matched = false;
         if(!hasResidue) {
             _iterStack.clear();
             IDSOwner candidate(new Ideograph(entry.first));
             matched = MatchSearchTerms(candidate.get(), terms);
+            if(!matched && config.fuzzyMatch.strokeNeutralComposition &&
+                composedEntries != _strokeNeutralCompositionDB.end()) {
+                for(const auto& ids: composedEntries->second) {
+                    _iterStack.clear();
+                    if(MatchSearchTerms(ids.get(), terms)) {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
         } else {
             for(const auto& ids: entry.second) {
                 _iterStack.clear();
                 if(MatchSearchTerms(ids.get(), terms)) {
                     matched = true;
                     break;
+                }
+            }
+            if(!matched && config.fuzzyMatch.strokeNeutralComposition &&
+                composedEntries != _strokeNeutralCompositionDB.end()) {
+                for(const auto& ids: composedEntries->second) {
+                    _iterStack.clear();
+                    if(MatchSearchTerms(ids.get(), terms)) {
+                        matched = true;
+                        break;
+                    }
                 }
             }
         }

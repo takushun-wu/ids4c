@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 
 #include <iostream>
 #include <sqlite3.h>
@@ -44,6 +45,15 @@ int main() {
     IDSOwner basicStroke = ParseIDSOwned("#(S)");
     if(basicStroke == nullptr || basicStroke->GetType() != IDS_STROKE)
         return Fail("A standalone abstract stroke did not parse.");
+    std::vector<std::string> localeOrder;
+    if(!ParseLocaleSuffixFallbackOrder("C>G>.>H>T", localeOrder) ||
+        localeOrder != std::vector<std::string>({"C", "G", "", "H", "T"}) ||
+        ParseLocaleSuffixFallbackOrder("C>>G", localeOrder) ||
+        !ParseLocaleSuffixFallbackOrder("C=G>.=H", localeOrder) ||
+        localeOrder != std::vector<std::string>({"C=G", ".=H"}) ||
+        ParseLocaleSuffixFallbackOrder("C==G", localeOrder) ||
+        ParseLocaleSuffixFallbackOrder("C>G=C", localeOrder))
+        return Fail("Locale suffix fallback order parsing did not validate or normalize correctly.");
 
     {
         std::ofstream source("db/parse-diagnostics.dat");
@@ -102,6 +112,39 @@ int main() {
     std::remove("db/cross-ids.dat");
     std::remove("db/cross-ids.sqlite");
 
+    // Stroke-neutral composition cache: build 斤 from a lowercase stroke variant.
+    std::remove("db/stroke-neutral.sqlite");
+    {
+        std::ofstream source("db/stroke-neutral.dat");
+        source << u8"斤\t⿸𠂆s丅\n";
+        source << u8"丘\t⿱⿸𠂆s丅一\n";
+    }
+    {
+        IDSdatabase compositionDatabase("stroke-neutral");
+        if(compositionDatabase.ImportDB("db/stroke-neutral.dat") != 0)
+            return Fail("The stroke-neutral composition fixture could not be imported.");
+
+        if(!ExpectMatch(compositionDatabase, u8"⿱斤一", u8"丘") ||
+            !ExpectComponentSearch(compositionDatabase, u8"斤", u8"丘"))
+            return Fail("The stroke-neutral composition cache did not support matching and search.");
+
+        IDSOwner compositionQuery = ParseIDSOwned(u8"⿱斤一");
+        if(compositionQuery == nullptr)
+            return Fail("The stroke-neutral composition query did not parse.");
+        const std::vector<IDSMatchDetail> details = compositionDatabase.MatchDetailed(compositionQuery.get());
+        const auto detail = std::find_if(details.begin(), details.end(),
+            [](const IDSMatchDetail& value) { return value.glyph == Ideograph(u8"丘"); });
+        if(detail == details.end())
+            return Fail("The stroke-neutral composition detail did not identify its cache source.");
+    }
+    {
+        IDSdatabase reloadedCompositionDatabase("stroke-neutral");
+        if(!ExpectMatch(reloadedCompositionDatabase, u8"⿱斤一", u8"丘"))
+            return Fail("The persisted stroke-neutral composition cache did not reload.");
+    }
+    std::remove("db/stroke-neutral.dat");
+    std::remove("db/stroke-neutral.sqlite");
+
     {
         std::ofstream source("db/yibai-stroke.dat");
         source << u8"\u4E28\t#(S)\n";
@@ -115,7 +158,82 @@ int main() {
     if(!yibaiStrokeImported)
         return Fail("A YiBai stroke expression did not import.");
 
-    std::remove("db/yibai-compat.sqlite");
+    // YiBai 私有库可能使用单独的 CR 换行；相邻字形不能因此合并。
+    std::remove("db/yibai-cr-private.sqlite");
+    {
+        std::ofstream base("db/yibai-cr-base.dat", std::ios::binary);
+        base << u8"基\t⿰一一\n";
+        std::ofstream privateSource("db/yibai-cr-private.dat", std::ios::binary);
+        privateSource << u8"㩂C\t⿰扌斛.\t⿰捔.斗\r";
+        privateSource << u8"㪱C\t⿰文.d奂\r";
+        privateSource << u8"㫆C\t⿰方.尒.\t⿸㫃.小.\r";
+    }
+    {
+        IDSdatabase crPrivateDatabase("yibai-cr-private");
+        if(crPrivateDatabase.ImportDB("db/yibai-cr-base.dat") != 0 ||
+            crPrivateDatabase.ImportPrivateDB("db/yibai-cr-private.dat", IDSDB_YIBAI) != 0)
+            return Fail("A CR-separated private YiBai IDS library could not be imported.");
+        const IDSOwnerList firstGlyph = crPrivateDatabase.GetRawIDSOwned(Ideograph(u8"㩂C"));
+        const IDSOwnerList secondGlyph = crPrivateDatabase.GetRawIDSOwned(Ideograph(u8"㪱C"));
+        const IDSOwnerList thirdGlyph = crPrivateDatabase.GetRawIDSOwned(Ideograph(u8"㫆C"));
+        if(firstGlyph.size() != 2 || secondGlyph.size() != 1 || thirdGlyph.size() != 2 ||
+            !ExpectMatch(crPrivateDatabase, u8"⿰文奂", u8"㪱C"))
+            return Fail("CR-separated YiBai records were merged into the wrong C-suffixed glyph.");
+    }
+    std::remove("db/yibai-cr-base.dat");
+    std::remove("db/yibai-cr-private.dat");
+    std::remove("db/yibai-cr-private.sqlite");
+
+    std::remove("db/locale-order.sqlite");
+    {
+        std::ofstream source("db/locale-order.dat");
+        source << u8"甲C\t⿰一一\n";
+        source << u8"甲G\t⿰一一\n";
+        source << u8"甲\t⿰一一\n";
+        source << u8"甲H\t⿰一一\n";
+        source << u8"甲T\t⿰一一\n";
+        source << u8"乙X\t⿰二二\n";
+        source << u8"丁C\t⿰三三\n";
+        source << u8"丁G\t⿰四四\n";
+        source << u8"丙\t⿰四四\n";
+        source << u8"丙J\t⿰一一\n";
+        source << u8"乙T\t⿰二二\n";
+    }
+    {
+        IDSdatabase localeDatabase("locale-order");
+        if(localeDatabase.ImportDB("db/locale-order.dat", IDSDB_YIBAI) != 0)
+            return Fail("The locale suffix fallback fixture could not be imported.");
+        IDSOwner firstLocaleQuery = ParseIDSOwned(u8"⿰一一");
+        IDSOwner secondLocaleQuery = ParseIDSOwned(u8"⿰二二");
+        if(firstLocaleQuery == nullptr || secondLocaleQuery == nullptr)
+            return Fail("The locale suffix fallback queries did not parse.");
+        IDSqueryOptions localeOptions;
+        localeOptions.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES;
+        if(!ParseLocaleSuffixFallbackOrder("C>G>.>H>T", localeOptions.filter.localeSuffixFallbackOrder))
+            return Fail("The locale suffix fallback test order did not parse.");
+        const IDSOwnerList defaultIDS = localeDatabase.GetIDSOwned(Ideograph(u8"丁"));
+        if(defaultIDS.size() != 2)
+            return Fail("FindIDS changed its default suffix fallback behavior.");
+        localeDatabase.config.fuzzyMatch.localeSuffixFallbackOrder = {"G", "C"};
+        const IDSOwnerList preferredIDS = localeDatabase.GetIDSOwned(Ideograph(u8"丁"));
+        if(preferredIDS.size() != 1 || preferredIDS.front()->toString() != u8"▥(四|四)")
+            return Fail("FindIDS did not apply the configured suffix fallback order.");
+        localeDatabase.config.fuzzyMatch.localeSuffixFallbackOrder = {"C=G"};
+        const IDSOwnerList sameLevelIDS = localeDatabase.GetIDSOwned(Ideograph(u8"丁"));
+        if(sameLevelIDS.size() != 2)
+            return Fail("FindIDS did not try same-level suffixes together.");
+        localeDatabase.config.fuzzyMatch.localeSuffixFallbackOrder = {"G", "C"};
+        const std::vector<Ideograph> firstLocaleMatches =
+            localeDatabase.MatchQuery(firstLocaleQuery.get(), localeOptions);
+        const std::vector<Ideograph> secondLocaleMatches =
+            localeDatabase.MatchQuery(secondLocaleQuery.get(), localeOptions);
+        if(firstLocaleMatches.size() != 1 || !HasIdeograph(firstLocaleMatches, u8"甲C") ||
+            secondLocaleMatches.size() != 1 || !HasIdeograph(secondLocaleMatches, u8"乙T"))
+            return Fail("The configured locale suffix fallback order was not applied.");
+        std::remove("db/locale-order.dat");
+        std::remove("db/locale-order.sqlite");
+        std::remove("db/yibai-compat.sqlite");
+    }
     {
         std::ofstream source("db/yibai-compat.dat");
         source << u8"\u8863\t\u2FF1\u4EA0.\U00027607.(.)\n";
@@ -142,6 +260,72 @@ int main() {
             return Fail("The YiBai compatibility query did not expose ⿴衣⬚ as an equivalent query.");
     }
     std::remove("db/yibai-compat.sqlite");
+    std::remove("db/hv-origin.sqlite");
+    {
+        std::ofstream source("db/hv-origin.dat");
+        source << u8"土\t⿱十一\n";
+        source << u8"士\t{士}⿱十一\n";
+        source << u8"吉\t⿱士口\n";
+        source << u8"干\t⿱一十\n";
+        source << u8"王\t⿱一土\t⿱干一\n";
+        source << u8"丙\t{?0}⿱一二\n";
+        source << u8"丁\t⿱一二\n";
+        source << u8"㞷\t⿱屮王\n";
+    }
+    {
+        IDSdatabase hvOriginDatabase("hv-origin");
+        if(hvOriginDatabase.ImportDB("db/hv-origin.dat") != 0)
+            return Fail("The HV origin-range fixture could not be imported.");
+        IDSOwner sameIDSQuery = ParseIDSOwned(u8"⿱一二");
+        if(sameIDSQuery == nullptr)
+            return Fail("The same-IDS prefix fixture query did not parse.");
+        const std::vector<Ideograph> sameIDSMatches = hvOriginDatabase.MatchQuery(sameIDSQuery.get());
+        if(!HasIdeograph(sameIDSMatches, u8"丙") || !HasIdeograph(sameIDSMatches, u8"丁"))
+            return Fail("{?0} incorrectly disabled same-IDS preprocessing.");
+
+        const IDSOwnerList cachedJi = hvOriginDatabase.GetIDSOwned(Ideograph(u8"吉"));
+        if(cachedJi.size() != 1 || cachedJi.front()->toString().find(u8"[士=0:2]") == std::string::npos)
+            return Fail("HVExtract did not preserve the ambiguous source glyph range.");
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=士>", u8"吉"))
+            return Fail("An HV origin range did not preserve matching of the original ambiguous glyph.");
+        if(ExpectMatch(hvOriginDatabase, u8"<search=土>", u8"吉"))
+            return Fail("An HV origin range still confused 士 with 土 after expansion.");
+        const IDSOwnerList cachedHu = hvOriginDatabase.GetIDSOwned(Ideograph(u8"㞷"));
+        if(cachedHu.empty()) return Fail("HVExtract did not produce any cached expansion for the ambiguous glyph.");
+        if(ExpectMatch(hvOriginDatabase, u8"<search=士>", u8"㞷"))
+            return Fail("A not-equivalent same-IDS source still matched its unique counterpart.");
+        bool foundFlattenedHu = false;
+        for(const IDSOwner& cached: cachedHu) {
+            if(cached->toString().find(u8"十一") == std::string::npos) continue;
+            foundFlattenedHu = true;
+            if(cached->toString().find(u8"[土=2:4]") == std::string::npos)
+                return Fail("An alternate HV path lost the ambiguous same-IDS source range.");
+        }
+        if(!foundFlattenedHu)
+            return Fail("The HV origin fixture did not produce the alternate flattened path.");
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=土>", u8"㞷"))
+            return Fail("The original ambiguous same-IDS source no longer matched its HV expansion.");
+    }
+    std::remove("db/hv-origin.dat");
+    {
+        IDSdatabase reloadedHVOriginDatabase("hv-origin");
+        const IDSOwnerList cachedJi = reloadedHVOriginDatabase.GetIDSOwned(Ideograph(u8"吉"));
+        if(cachedJi.size() != 1 || cachedJi.front()->toString().find(u8"[士=0:2]") == std::string::npos)
+            return Fail("HV origin-range metadata did not survive SQLite reload.");
+        if(ExpectMatch(reloadedHVOriginDatabase, u8"<search=土>", u8"吉"))
+            return Fail("HV origin-range matching changed after SQLite reload.");
+        const IDSOwnerList cachedHu = reloadedHVOriginDatabase.GetIDSOwned(Ideograph(u8"㞷"));
+        bool foundReloadedFlattenedHu = false;
+        for(const IDSOwner& cached: cachedHu) {
+            if(cached->toString().find(u8"十一") == std::string::npos) continue;
+            foundReloadedFlattenedHu = true;
+            if(cached->toString().find(u8"[土=2:4]") == std::string::npos)
+                return Fail("An alternate HV path lost its range after SQLite reload.");
+        }
+        if(!foundReloadedFlattenedHu)
+            return Fail("The alternate flattened HV path did not survive SQLite reload.");
+    }
+    std::remove("db/hv-origin.sqlite");
 
     std::remove("db/replace-query.sqlite");
     {

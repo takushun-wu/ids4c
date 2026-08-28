@@ -111,6 +111,28 @@ A variable with the same name must correspond to the same IDS unit within one ca
 
 Full-width letters and digits are not automatically converted to variables during ordinary IDS import because they may be actual glyph components.
 
+## HV origin-range annotations
+
+The optional brackets on `▥` and `▤` record an ambiguity source produced by HVExtract; they are not ordinary components:
+
+```text
+▥[士=0:2](十一|口)
+```
+
+`士=0:2` means that the half-open child range `[0, 2)` in the derived structure originated from the glyph 士. Multiple origins are comma-separated, for example `[士=0:2,土=1:3]`. The `glyph` field is recorded only for source glyphs that require the explicit uniqueness distinction described in section 7.1 of IDS.pdf; callers should not add this annotation to an unambiguous structure.
+
+This annotation mainly appears in the HV cache, detailed match results, or equivalent queries. The parser preserves it, and the matcher uses it to avoid treating 土 and an explicitly distinguished 士 as the same component. It is different from the combination-structure arguments in `▥(...)` / `▤(...)`; the ordinary `|` split marker in an arrangement must not be treated as a component.
+
+## Raw IDS and derived caches
+
+Database import preserves the raw IDS and builds derived query caches:
+
+- raw IDS are the traceable definitions from sources such as `ids_lv0.txt`;
+- the HVExtract cache stores multiple structural alternatives when one raw IDS expands in more than one way;
+- the stroke-neutral composition cache ignores lowercase stroke suffix differences only during composition lookup, for example allowing `一t` to act as a composable component without changing the raw definition;
+- private-data reimports and cache rebuilds regenerate derived caches from the raw IDS.
+
+Consequently, `raw_ids` and `matched_ids` in a detailed result may differ. Use `match_source` and `preprocess_rules` to identify the cache source and preprocessing rules used.
 ## Unicode escapes
 
 Before parsing, Unicode code points can be written using \uXXXX and \UXXXXXXXX:
