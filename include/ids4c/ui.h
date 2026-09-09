@@ -12,7 +12,7 @@
 
 #include "ids4c/idsdb.h"
 
-#define VERSION "0.2.0"
+#define VERSION "0.2.1"
 
 #define FONTCFG_DEFAULT         "WenJin Mincho Plane 0,WenJin Mincho Plane 2,WenJin Mincho Plane 3"
 #define QUERY_FONTSIZE_DEFAULT  16

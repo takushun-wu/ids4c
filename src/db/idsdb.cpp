@@ -282,14 +282,15 @@ private:
     bool  _previous;
 };
 
+template <typename Bindings>
 class VariableBindingScope {
 private:
-    std::unordered_map<std::string, std::string>& _bindings;
-    std::unordered_map<std::string, std::string>  _saved;
+    Bindings& _bindings;
+    Bindings  _saved;
     bool                                          _committed = false;
 
 public:
-    explicit VariableBindingScope(std::unordered_map<std::string, std::string>& bindings):
+    explicit VariableBindingScope(Bindings& bindings):
         _bindings(bindings),
         _saved(bindings) {}
 
@@ -297,7 +298,7 @@ public:
         if(!_committed) _bindings = std::move(_saved);
     }
 
-    const std::unordered_map<std::string, std::string>& GetSaved() const { return _saved; }
+    const Bindings& GetSaved() const { return _saved; }
 
     bool Finish(bool matched) {
         _committed = matched;
@@ -2534,7 +2535,8 @@ void IDSdatabase::ApplyResultFilter(std::vector<Ideograph>& result, const IDSque
         result.end());
 }
 
-bool IDSdatabase::IDSarrayMatch(const std::vector<IDS*>& s, const std::vector<IDS*>& p, size_t sIdx, size_t pIdx) {
+bool IDSdatabase::IDSarrayMatch(
+    const std::vector<IDS*>& s, const std::vector<IDS*>& p, IDCtype arrangement, size_t sIdx, size_t pIdx) {
     VariableBindingScope bindings(_variableBindings);
     if(sIdx == s.size() && pIdx == p.size()) return bindings.Finish(true);
     if(sIdx == s.size() || pIdx == p.size()) return false;
@@ -2542,12 +2544,32 @@ bool IDSdatabase::IDSarrayMatch(const std::vector<IDS*>& s, const std::vector<ID
     IDS* currentPatternIDS = p[pIdx];
     if(IsWildcard(currentPatternIDS)) {
         for(size_t i = 1; i < s.size() - sIdx + 1; i++)
-            if(IDSarrayMatch(s, p, sIdx + i, pIdx + 1)) return bindings.Finish(true);
+            if(IDSarrayMatch(s, p, arrangement, sIdx + i, pIdx + 1)) return bindings.Finish(true);
+        return false;
+    }
+
+    if(IsVariable(currentPatternIDS)) {
+        const size_t minimumRemaining  = p.size() - pIdx - 1;
+        const size_t candidateRemaining = s.size() - sIdx;
+        // Avoid unsigned underflow before calculating the width available to this variable.
+        if(candidateRemaining <= minimumRemaining) return false;
+        const size_t maximumWidth = candidateRemaining - minimumRemaining;
+
+        IDSVariable* variable = AsVariable(currentPatternIDS);
+        const auto existing          = _variableBindings.find(variable->GetName());
+        const size_t widthLimit = existing == _variableBindings.end() ? maximumWidth : 1;
+        for(size_t width = 1; width <= widthLimit; width++) {
+            _variableBindings = bindings.GetSaved();
+            const std::vector<IDS*> range(s.begin() + sIdx, s.begin() + sIdx + width);
+            if(MatchVariableRange(range, variable, arrangement) &&
+                IDSarrayMatch(s, p, arrangement, sIdx + width, pIdx + 1))
+                return bindings.Finish(true);
+        }
         return false;
     }
 
     if(!IDSmatch(s[sIdx], currentPatternIDS)) return false;
-    return bindings.Finish(IDSarrayMatch(s, p, sIdx + 1, pIdx + 1));
+    return bindings.Finish(IDSarrayMatch(s, p, arrangement, sIdx + 1, pIdx + 1));
 }
 typedef struct {
     IDCtype arrange;
@@ -2597,12 +2619,73 @@ bool IDSdatabase::MatchVariable(IDS* idsInDB, IDSVariable* variable) {
     const std::string& name     = variable->GetName();
     const auto         existing = _variableBindings.find(name);
     if(existing == _variableBindings.end()) {
-        _variableBindings.emplace(name, idsInDB->toString());
+        VariableBinding binding;
+        binding.nodes.push_back(idsInDB->toString());
+        _variableBindings.emplace(name, std::move(binding));
         return true;
     }
 
-    IDSOwner bound = ParseIDSOwned(existing->second);
-    return bound != nullptr && VariableEquivalent(bound.get(), idsInDB);
+    return VariableBindingEquivalent(existing->second, idsInDB);
+}
+
+bool IDSdatabase::MatchVariableRange(
+    const std::vector<IDS*>& candidates, IDSVariable* variable, IDCtype arrangement) {
+    if(candidates.empty() || variable == nullptr || !IsArrangeIDC(arrangement)) return false;
+
+    const auto existing = _variableBindings.find(variable->GetName());
+    if(existing != _variableBindings.end())
+        return VariableBindingEquivalent(existing->second, candidates, arrangement);
+
+    VariableBinding binding;
+    binding.arrangement = candidates.size() > 1 ? arrangement : IDC_UNKNOWN;
+    binding.nodes.reserve(candidates.size());
+    for(IDS* candidate: candidates) {
+        if(candidate == nullptr) return false;
+        binding.nodes.push_back(candidate->toString());
+    }
+    _variableBindings.emplace(variable->GetName(), std::move(binding));
+    return true;
+}
+
+bool IDSdatabase::VariableBindingEquivalent(const VariableBinding& binding, IDS* candidate) {
+    if(candidate == nullptr || binding.nodes.empty()) return false;
+    return VariableBindingEquivalent(binding, std::vector<IDS*>({candidate}), IDC_UNKNOWN);
+}
+
+bool IDSdatabase::VariableBindingEquivalent(
+    const VariableBinding& binding, const std::vector<IDS*>& candidates, IDCtype arrangement) {
+    if(binding.nodes.empty() || candidates.empty()) return false;
+
+    auto matchesNodes = [&](const std::vector<IDS*>& values) {
+        if(values.size() != binding.nodes.size()) return false;
+        for(size_t index = 0; index < values.size(); index++) {
+            IDSOwner bound = ParseIDSOwned(binding.nodes[index]);
+            if(bound == nullptr || !VariableEquivalent(bound.get(), values[index])) return false;
+        }
+        return true;
+    };
+
+    if(binding.arrangement == IDC_UNKNOWN)
+        return candidates.size() == 1 && matchesNodes(candidates);
+    if(arrangement == binding.arrangement && matchesNodes(candidates)) return true;
+    if(candidates.size() != 1 || candidates.front() == nullptr) return false;
+
+    IDS* candidate = candidates.front();
+    auto matchesExpansion = [&](IDS* expansion) {
+        return IsPattern(expansion) && HVArrangementType(AsPattern(expansion)) == binding.arrangement &&
+            matchesNodes(BorrowPatternIDS(AsPattern(expansion)));
+    };
+
+    if(matchesExpansion(candidate)) return true;
+    if(IsIdeograph(candidate)) {
+        for(IDS* expansion: FindIDS(*AsIdeograph(candidate)))
+            if(matchesExpansion(expansion)) return true;
+    } else if(IsPattern(candidate)) {
+        bool truncated = false;
+        for(const IDSOwner& expansion: HVExtractAlternativesInternal(candidate, true, false, 64, truncated))
+            if(matchesExpansion(expansion.get())) return true;
+    }
+    return false;
 }
 
 bool IDSdatabase::VariableEquivalent(IDS* bound, IDS* candidate) {
@@ -3040,7 +3123,7 @@ bool IDSdatabase::MatchNormalizedPatterns(Pattern* pidsInDB, Pattern* pids) {
     if(pids->GetIDC() != pidsInDB->GetIDC()) return false;
 
     if(IsArrangeIDC(pids->GetIDC()))
-        return bindings.Finish(IDSarrayMatch(BorrowPatternIDS(pidsInDB), BorrowPatternIDS(pids)));
+        return bindings.Finish(IDSarrayMatch(BorrowPatternIDS(pidsInDB), BorrowPatternIDS(pids), pids->GetIDC()));
 
     if(pids->GetIDC() == IDC_OVERLAY && PatternChildCount(pids) == PatternChildCount(pidsInDB)) {
         if(IDSmatch(PatternChild(pidsInDB, 0), PatternChild(pids, 0)) &&
@@ -3691,11 +3774,15 @@ IDSOwnerList IDSdatabase::ExpandIWDSQuery(IDS* ids, size_t maximum) {
                     for(const auto& targetMember: group) {
                         std::string expression = targetMember->toString();
                         for(const auto& binding: bindings) {
+                            // IWDS template instantiation has no arrangement context. A sequence
+                            // binding is therefore not representable as one <var=...> replacement.
+                            if(binding.second.arrangement != IDC_UNKNOWN || binding.second.nodes.size() != 1) continue;
                             const std::string token  = "<var=" + binding.first + ">";
+                            const std::string& value = binding.second.nodes.front();
                             size_t            offset = 0;
                             while((offset = expression.find(token, offset)) != std::string::npos) {
-                                expression.replace(offset, token.size(), binding.second);
-                                offset += binding.second.size();
+                                expression.replace(offset, token.size(), value);
+                                offset += value.size();
                             }
                         }
 
@@ -4580,6 +4667,9 @@ bool IDSdatabase::FindMatchPath(IDS* candidate, IDS* query, const std::string& p
 void IDSdatabase::BuildHVMatchPaths(IDS* query, IDS* matched, const std::string& queryPath,
     const std::string& matchedPath, std::vector<IDSMatchPath>& paths) {
     if(query == nullptr || matched == nullptr) return;
+    // Detail generation reuses the bindings produced by the successful structural match.
+    // Keep any path-only attempts local to this recursion frame.
+    VariableBindingScope pathBindings(_variableBindings);
 
     auto appendRange = [&paths](const std::string& rangeQueryPath, const std::string& rangeMatchedPath,
                            size_t queryBegin, size_t queryEnd, size_t matchedBegin, size_t matchedEnd) {
@@ -4656,7 +4746,40 @@ void IDSdatabase::BuildHVMatchPaths(IDS* query, IDS* matched, const std::string&
     std::vector<size_t>                 selectedWidths(queryChildren.size(), 0);
     std::function<bool(size_t, size_t)> align = [&](size_t queryIndex, size_t matchedIndex) {
         if(queryIndex == choicesByChild.size()) return matchedIndex == matchedChildren.size();
+        const VariableBindings savedBindings = _variableBindings;
+
+        IDS* queryChild = queryChildren[queryIndex].get();
+        if(IsVariable(queryChild)) {
+            IDSVariable* variable = AsVariable(queryChild);
+            const auto binding = _variableBindings.find(variable->GetName());
+            size_t width = 1;
+            bool   equal = false;
+            if(binding != _variableBindings.end() &&
+                binding->second.arrangement == queryArrangement && binding->second.nodes.size() > 1) {
+                width = binding->second.nodes.size();
+                if(matchedIndex + width <= matchedChildren.size()) {
+                    std::vector<IDS*> range;
+                    range.reserve(width);
+                    for(size_t offset = 0; offset < width; offset++)
+                        range.push_back(matchedChildren[matchedIndex + offset].get());
+                    equal = VariableBindingEquivalent(binding->second, range, queryArrangement);
+                }
+            } else if(matchedIndex < matchedChildren.size()) {
+                equal = binding != _variableBindings.end()
+                    ? VariableBindingEquivalent(binding->second, matchedChildren[matchedIndex].get())
+                    : IDSmatch(matchedChildren[matchedIndex].get(), queryChild);
+            }
+            if(equal) {
+                selectedChoices[queryIndex] = 0;
+                selectedWidths[queryIndex]  = width;
+                if(align(queryIndex + 1, matchedIndex + width)) return true;
+            }
+            _variableBindings = savedBindings;
+            return false;
+        }
+
         for(size_t choiceIndex = 0; choiceIndex < choicesByChild[queryIndex].size(); choiceIndex++) {
+            _variableBindings = savedBindings;
             const IDSOwnerList& segment = choicesByChild[queryIndex][choiceIndex];
             if(segment.size() == 1 && IsWildcard(segment.front().get())) {
                 for(size_t width = 1; matchedIndex + width <= matchedChildren.size(); width++) {
@@ -4669,7 +4792,6 @@ void IDSdatabase::BuildHVMatchPaths(IDS* query, IDS* matched, const std::string&
             if(matchedIndex + segment.size() > matchedChildren.size()) continue;
             bool equal = true;
             for(size_t offset = 0; offset < segment.size(); offset++) {
-                _variableBindings.clear();
                 if(!IDSequal(segment[offset].get(), matchedChildren[matchedIndex + offset].get()) &&
                     !IDSmatch(matchedChildren[matchedIndex + offset].get(), segment[offset].get())) {
                     equal = false;
@@ -4681,6 +4803,7 @@ void IDSdatabase::BuildHVMatchPaths(IDS* query, IDS* matched, const std::string&
             selectedWidths[queryIndex]  = segment.size();
             if(align(queryIndex + 1, matchedIndex + segment.size())) return true;
         }
+        _variableBindings = savedBindings;
         return false;
     };
 
@@ -4690,9 +4813,9 @@ void IDSdatabase::BuildHVMatchPaths(IDS* query, IDS* matched, const std::string&
         const IDSOwnerList& segment      = choicesByChild[index][selectedChoices[index]];
         const size_t        segmentWidth = selectedWidths[index] == 0 ? segment.size() : selectedWidths[index];
         appendRange(queryPath, matchedPath, index, index + 1, matchedIndex, matchedIndex + segmentWidth);
-        if(segmentWidth == 1 && segment.size() == 1 && IsPattern(queryChildren[index].get()) &&
-            IsPattern(segment.front().get())) {
-            BuildHVMatchPaths(queryChildren[index].get(), segment.front().get(),
+        if(segmentWidth == 1 && IsPattern(queryChildren[index].get()) &&
+            IsPattern(matchedChildren[matchedIndex].get())) {
+            BuildHVMatchPaths(queryChildren[index].get(), matchedChildren[matchedIndex].get(),
                 AppendTracePath(queryPath, "child[" + std::to_string(index) + "]"),
                 AppendTracePath(matchedPath, "child[" + std::to_string(matchedIndex) + "]"), paths);
         }

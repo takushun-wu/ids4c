@@ -283,7 +283,13 @@ private:
         uint32_t maximum = std::numeric_limits<uint32_t>::max();
         bool     bounded = false;
     };
-    using VariableBindings = std::unordered_map<std::string, std::string>;
+    // <var=...> 默认绑定一个 IDS 节点。在 ▥/▤ 的直接子项中，它也可以绑定
+    // 一段同向的连续节点；arrangement 为 UNKNOWN 时表示普通单节点绑定。
+    struct VariableBinding {
+        IDCtype                  arrangement = IDC_UNKNOWN;
+        std::vector<std::string> nodes;
+    };
+    using VariableBindings = std::unordered_map<std::string, VariableBinding>;
     struct SameIDSHashGroup {
         std::string            expression;
         std::vector<Ideograph> glyphs;
@@ -408,9 +414,14 @@ private:
     bool     ShouldIncludeResult(Ideograph ideograph, const IDSqueryOptions& options) const;
     void     ApplyResultFilter(std::vector<Ideograph>& result, const IDSqueryOptions& options) const;
 
-    bool IDSarrayMatch(const std::vector<IDS*>& s, const std::vector<IDS*>& p, size_t sIdx = 0, size_t pIdx = 0);
+    bool IDSarrayMatch(const std::vector<IDS*>& s, const std::vector<IDS*>& p, IDCtype arrangement,
+        size_t sIdx = 0, size_t pIdx = 0);
     bool IDSmatch(IDS* idsInDB, IDS* ids, bool surroundEqual = true);
     bool MatchVariable(IDS* idsInDB, IDSVariable* variable);
+    bool MatchVariableRange(const std::vector<IDS*>& candidates, IDSVariable* variable, IDCtype arrangement);
+    bool VariableBindingEquivalent(const VariableBinding& binding, IDS* candidate);
+    bool VariableBindingEquivalent(
+        const VariableBinding& binding, const std::vector<IDS*>& candidates, IDCtype arrangement);
     bool VariableEquivalent(IDS* bound, IDS* candidate);
     bool MatchesSameIDS(IDS* idsInDB, Ideograph query, bool ignoreSuffix = false);
     bool MatchSearchExpression(IDS* idsInDB, SearchExpression* search);

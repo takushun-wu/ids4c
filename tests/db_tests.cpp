@@ -96,6 +96,7 @@ int main() {
 
     // 同一个字形的多个 IDS 定义必须各自独立匹配，不能把不同定义的部件拼接起来。
     std::remove("db/cross-ids.sqlite");
+
     {
         std::ofstream source("db/cross-ids.dat");
         source << u8"𳄼\t⿰𣁎糸\n";
@@ -111,6 +112,48 @@ int main() {
     }
     std::remove("db/cross-ids.dat");
     std::remove("db/cross-ids.sqlite");
+
+    // A repeated variable may bind a contiguous HV expansion and later match
+    // an ideograph that expands to the same directional sequence.
+    std::remove("db/variable-hv.sqlite");
+    {
+        std::ofstream source("db/variable-hv.dat");
+        source << u8"\uE150\t\u2FF3\U000200D7\u4E3F\u6728d\n";
+        source << u8"\uE151\t\u2FF1\uE150\u2FF0\uE150\uE150\n";
+    }
+    {
+        IDSdatabase variableHVDatabase("variable-hv");
+        if(variableHVDatabase.ImportDB("db/variable-hv.dat") != 0)
+            return Fail("The variable HV fixture could not be imported.");
+
+        IDSOwner variableHVQuery = ParseIDSOwned(u8"\u2FF1<var=1>\u2FF0<var=1><var=1>");
+        if(variableHVQuery == nullptr || !HasIdeograph(variableHVDatabase.MatchQuery(variableHVQuery.get()), u8"\uE151"))
+            return Fail("A repeated variable did not match its contiguous HV expansion.");
+
+        const std::vector<IDSMatchDetail> variableDetails = variableHVDatabase.MatchDetailed(variableHVQuery.get());
+        const auto variableDetail = std::find_if(variableDetails.begin(), variableDetails.end(), [](const IDSMatchDetail& detail) {
+            return detail.glyph == Ideograph(u8"\uE151");
+        });
+        const bool hasBoundRange = variableDetail != variableDetails.end() &&
+            std::any_of(variableDetail->matchPaths.begin(), variableDetail->matchPaths.end(), [](const IDSMatchPath& path) {
+                return path.queryPath == "/child[0:1]" && path.path == "/child[0:3]";
+            });
+        const bool hasRepeatedRange = variableDetail != variableDetails.end() &&
+            std::any_of(variableDetail->matchPaths.begin(), variableDetail->matchPaths.end(), [](const IDSMatchPath& path) {
+                return path.queryPath == "/child[1]/child[0:1]" && path.path == "/child[3]/child[0:1]";
+            });
+        if(!hasBoundRange || !hasRepeatedRange)
+            return Fail("Variable HV matching did not expose the bound and repeated match paths.");
+    }
+    std::remove("db/variable-hv.dat");
+
+    // A four-variable normalized arrangement must reject short candidates without
+    // constructing an out-of-range child interval.
+    IDSOwner shortVariableQuery = ParseIDSOwned(u8"\u2FF2\u2FF0<var=1><var=1><var=1><var=1>");
+    IDSdatabase shortVariableDatabase("variable-hv");
+    if(shortVariableQuery == nullptr || !shortVariableDatabase.MatchQuery(shortVariableQuery.get()).empty())
+        return Fail("A short candidate crashed or matched a four-variable arrangement.");
+    std::remove("db/variable-hv.sqlite");
 
     // Stroke-neutral composition cache: build 斤 from a lowercase stroke variant.
     std::remove("db/stroke-neutral.sqlite");
