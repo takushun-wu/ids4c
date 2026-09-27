@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.20)
 
 project(ids4c VERSION 0.3.0 LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 option(IDS4C_BUILD_GUI "Build the GTKmm desktop application" ON)
 option(IDS4C_BUILD_CLI "Build the command-line application" ON)
 option(IDS4C_BUILD_PYTHON "Build the pybind11 Python binding module" ON)
@@ -28,7 +32,7 @@ add_library(ids4c_core
     src/core/ids4c.cpp
 )
 add_library(ids4c::core ALIAS ids4c_core)
-target_compile_features(ids4c_core PUBLIC cxx_std_11)
+target_compile_features(ids4c_core PUBLIC cxx_std_17)
 target_include_directories(ids4c_core
     PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -51,7 +55,7 @@ add_library(ids4c::tinyxml2 ALIAS ids4c_tinyxml2)
 target_include_directories(ids4c_tinyxml2 PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/tinyxml2>
 )
-target_compile_features(ids4c_tinyxml2 PUBLIC cxx_std_11)
+target_compile_features(ids4c_tinyxml2 PUBLIC cxx_std_17)
 
 target_compile_definitions(ids4c_tinyxml2 PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
@@ -83,7 +87,7 @@ if(IDS4C_BUILD_CLI)
     )
     add_executable(ids4c::cli ALIAS ids4c_cli)
     target_link_libraries(ids4c_cli PRIVATE ids4c::db Boost::program_options Boost::filesystem Boost::system)
-    target_compile_features(ids4c_cli PRIVATE cxx_std_11)
+    target_compile_features(ids4c_cli PRIVATE cxx_std_17)
     set_target_properties(ids4c_cli PROPERTIES
         OUTPUT_NAME "ids4c-cli"
         VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:ids4c_cli>"
@@ -97,7 +101,7 @@ if(BUILD_TESTING)
         tests/db_tests.cpp
     )
     target_link_libraries(ids4c_db_tests PRIVATE ids4c::db)
-    target_compile_features(ids4c_db_tests PRIVATE cxx_std_11)
+    target_compile_features(ids4c_db_tests PRIVATE cxx_std_17)
 
     set(IDS4C_TEST_DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/data")
     file(MAKE_DIRECTORY "${IDS4C_TEST_DATA_DIR}/db")
@@ -153,7 +157,7 @@ if(IDS4C_BUILD_PYTHON)
     )
     add_library(ids4c::python ALIAS ids4c_python)
     target_link_libraries(ids4c_python PRIVATE ids4c::core ids4c::db)
-    target_compile_features(ids4c_python PRIVATE cxx_std_11)
+    target_compile_features(ids4c_python PRIVATE cxx_std_17)
     target_compile_options(ids4c_python
         PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>

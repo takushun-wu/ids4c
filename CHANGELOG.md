@@ -36,8 +36,10 @@
 
 ### 兼容性 / Compatibility
 
+- 最低编译要求改为 C++17，CMake 现在显式使用 C++17 标准编译项目目标。
 - CLI 的 `--result-filter ignore-other-locales` 已替换为 `ignore-other-locales-base-only` 和 `ignore-other-locales-keep-ivs`；Python `ResultFilter` 枚举相应更名。
 
+- The minimum compiler requirement is now C++17; CMake explicitly builds project targets in C++17 mode.
 - Replaced CLI `--result-filter ignore-other-locales` with `ignore-other-locales-base-only` and `ignore-other-locales-keep-ivs`; the Python `ResultFilter` enum names changed accordingly.
 
 ## v0.2.1

@@ -74,7 +74,7 @@ third_party/         项目直接使用的第三方源码
 基础构建要求：
 
 - CMake 3.20 或更高版本；
-- 支持 C++11 的编译器；
+- 支持 C++17 的编译器（构建时使用 `-std=c++17` 或工具链对应选项）；
 - SQLite 3；
 - `pkg-config`；
 - Boost，CLI 需要 `program_options`，GUI 需要 `filesystem` 和 `system`。

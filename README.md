@@ -74,7 +74,7 @@ third_party/         Third-party source used directly by the project
 Basic requirements:
 
 - CMake 3.20 or newer;
-- A C++11-capable compiler;
+- A compiler with C++17 support (the build uses `-std=c++17` or the toolchain equivalent);
 - SQLite 3;
 - pkg-config;
 - Boost. The CLI requires program_options; the GUI requires filesystem and system.

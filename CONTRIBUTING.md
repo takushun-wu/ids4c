@@ -4,6 +4,8 @@
 
 感谢你为 ids4c 提交问题、文档或代码。提交前请先阅读 [README.zh-CN.md](README.zh-CN.md) 和 [README.md](README.md)，确认修改符合项目当前的构建方式和查询语法。
 
+本项目要求 C++17；新增代码及本地编辑器配置应与 CMake 使用的语言标准一致。
+
 ### 本地验证
 
 在不需要 GUI 和 Python binding 时，可以使用以下配置：
@@ -29,6 +31,8 @@
 ## English
 
 Thank you for contributing issues, documentation, or code to ids4c. Before submitting a change, read [README.md](README.md) and [README.zh-CN.md](README.zh-CN.md) to ensure that it follows the current build process and query syntax.
+
+The project requires C++17. Keep new code and local editor settings aligned with the CMake language standard.
 
 ### Local verification
 
