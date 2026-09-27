@@ -12,7 +12,7 @@
 
 #include "ids4c/idsdb.h"
 
-#define VERSION "0.2.1"
+#define VERSION "0.3.0"
 
 #define FONTCFG_DEFAULT         "WenJin Mincho Plane 0,WenJin Mincho Plane 2,WenJin Mincho Plane 3"
 #define QUERY_FONTSIZE_DEFAULT  16
@@ -51,7 +51,7 @@ protected:
     Gtk::MenuItem                menuItemHelpAbout;
     Gtk::Statusbar               statusBar;
     Gtk::RadioButton::Group      rgFilter;
-    Gtk::RadioButton             rbFilterAll, rbFilterLcSuffix, rbFilterLocale;
+    Gtk::RadioButton             rbFilterAll, rbFilterLcSuffix, rbFilterLocale, rbFilterLocaleKeepIVS;
     Gtk::CheckButton             cbIgnoreOverlay, cbShowDetails, cbTrackMatchPaths;
     Gtk::Label                   labelGlyphDomain, labelUnicodeBlock;
     Gtk::ComboBoxText            cbGlyphDomain;
@@ -75,6 +75,7 @@ protected:
     std::string fontCfg;
     std::string defaultRegion;
     std::string localeSuffixFallbackOrder;
+    bool        excludeNonEquivalentSameIDS = true;
     unsigned    queryFontSize, resultFontSize;
     toml::value tomlCfg;
 

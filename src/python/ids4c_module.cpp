@@ -366,7 +366,8 @@ PYBIND11_MODULE(ids4c, module) {
     py::enum_<IDSresultFilter>(module, "ResultFilter")
         .value("ALL", IDS_RESULT_ALL)
         .value("IGNORE_LC_SUFFIX", IDS_RESULT_IGNORE_LC_SUFFIX)
-        .value("IGNORE_OTHER_LOCALES", IDS_RESULT_IGNORE_OTHER_LOCALES);
+        .value("IGNORE_OTHER_LOCALES_BASE_ONLY", IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY)
+        .value("IGNORE_OTHER_LOCALES_KEEP_IVS", IDS_RESULT_IGNORE_OTHER_LOCALES_KEEP_IVS);
 
     py::enum_<IDSglyphDomain>(module, "GlyphDomain")
         .value("ALL", IDS_GLYPH_DOMAIN_ALL)
@@ -422,6 +423,7 @@ PYBIND11_MODULE(ids4c, module) {
         .def_readwrite("unification_level", &IDSFuzzyMatchOptions::unificationLevel)
         .def_readwrite("default_region", &IDSFuzzyMatchOptions::defaultRegion)
         .def_readwrite("stroke_neutral_composition", &IDSFuzzyMatchOptions::strokeNeutralComposition)
+        .def_readwrite("exclude_non_equivalent_same_ids", &IDSFuzzyMatchOptions::excludeNonEquivalentSameIDS)
         .def_readwrite("locale_suffix_fallback_order", &IDSFuzzyMatchOptions::localeSuffixFallbackOrder);
 
     py::class_<IDSMiscOptions>(module, "MiscOptions")

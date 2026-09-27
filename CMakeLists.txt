@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ids4c VERSION 0.1.0 LANGUAGES CXX)
+project(ids4c VERSION 0.3.0 LANGUAGES CXX)
 
 option(IDS4C_BUILD_GUI "Build the GTKmm desktop application" ON)
 option(IDS4C_BUILD_CLI "Build the command-line application" ON)
@@ -15,6 +15,7 @@ endif()
 if(IDS4C_ENABLE_LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT IDS4C_IPO_SUPPORTED OUTPUT IDS4C_IPO_ERROR)
+
     if(IDS4C_IPO_SUPPORTED)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
@@ -30,17 +31,18 @@ add_library(ids4c::core ALIAS ids4c_core)
 target_compile_features(ids4c_core PUBLIC cxx_std_11)
 target_include_directories(ids4c_core
     PUBLIC
-        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/utf8cpp>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/utf8cpp>
 )
 
 target_compile_options(ids4c_core
     PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
 )
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+
 # 第三方目录只保留 tinyxml2 源码；直接编译，避免其不完整的安装规则参与本项目配置。
 add_library(ids4c_tinyxml2
     third_party/tinyxml2/tinyxml2.cpp
@@ -57,6 +59,7 @@ target_compile_definitions(ids4c_tinyxml2 PRIVATE
 
 add_library(ids4c_db
     src/db/idsdb.cpp
+    src/db/idsdb_index.cpp
     src/db/idsdb_import.cpp
     src/db/idsdb_iwds.cpp
     src/db/idsdb_sqlite.cpp
@@ -65,7 +68,7 @@ add_library(ids4c::db ALIAS ids4c_db)
 target_link_libraries(ids4c_db PUBLIC ids4c::core PkgConfig::SQLITE3 PRIVATE ids4c::tinyxml2)
 target_compile_options(ids4c_db
     PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
 )
 
 if(IDS4C_BUILD_CLI)
@@ -85,10 +88,10 @@ if(IDS4C_BUILD_CLI)
         OUTPUT_NAME "ids4c-cli"
         VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:ids4c_cli>"
     )
-
 endif()
 
 include(CTest)
+
 if(BUILD_TESTING)
     add_executable(ids4c_db_tests
         tests/db_tests.cpp
@@ -153,7 +156,7 @@ if(IDS4C_BUILD_PYTHON)
     target_compile_features(ids4c_python PRIVATE cxx_std_11)
     target_compile_options(ids4c_python
         PRIVATE
-            $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
     )
     set_target_properties(ids4c_python PROPERTIES
         PREFIX ""
@@ -161,10 +164,12 @@ if(IDS4C_BUILD_PYTHON)
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     )
+
     if(WIN32)
         set_target_properties(ids4c_python PROPERTIES SUFFIX ".pyd")
     endif()
 endif()
+
 if(IDS4C_BUILD_GUI)
     pkg_check_modules(GTKMM REQUIRED IMPORTED_TARGET gtkmm-3.0)
     find_package(Boost REQUIRED COMPONENTS filesystem system)
@@ -175,21 +180,21 @@ if(IDS4C_BUILD_GUI)
     add_library(ids4c::ui ALIAS ids4c_ui)
     target_link_libraries(ids4c_ui
         PUBLIC
-            ids4c::core
-            ids4c::db
-            PkgConfig::GTKMM
+        ids4c::core
+        ids4c::db
+        PkgConfig::GTKMM
         PRIVATE
-            Boost::filesystem
-            Boost::system
+        Boost::filesystem
+        Boost::system
     )
     target_include_directories(ids4c_ui
         PUBLIC
-            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/toml11>
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/toml11>
     )
     target_compile_options(ids4c_ui
         PRIVATE
-            $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
-            $<$<BOOL:${MINGW}>:-mms-bitfields>
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
+        $<$<BOOL:${MINGW}>:-mms-bitfields>
     )
 
     add_executable(ids4c
@@ -199,10 +204,10 @@ if(IDS4C_BUILD_GUI)
     set_target_properties(ids4c PROPERTIES
         VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:ids4c>"
     )
+
     if(WIN32)
         set_target_properties(ids4c PROPERTIES WIN32_EXECUTABLE TRUE)
     endif()
-
 endif()
 
 include(GNUInstallDirs)

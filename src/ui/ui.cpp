@@ -57,7 +57,8 @@ IDSui::IDSui():
     menuItemHelpAbout("_About", true),
     rbFilterAll("All", true),
     rbFilterLcSuffix("Ignore LC suffix", true),
-    rbFilterLocale("Ignore other locales", true),
+    rbFilterLocale("Ignore other locales (base only)", true),
+    rbFilterLocaleKeepIVS("Ignore other locales (keep IVS)", true),
     cbIgnoreOverlay(u8"Ignore \u2FFB overlay structures"),
     cbShowDetails("Show match details"),
     cbTrackMatchPaths("Track match paths"),
@@ -114,6 +115,7 @@ IDSui::IDSui():
     CreateDBTreeView();
     idsdb.reset(new IDSdatabase(selectedDB));
     idsdb->config.fuzzyMatch.unificationLevel = unificationLevel;
+    idsdb->config.fuzzyMatch.excludeNonEquivalentSameIDS = excludeNonEquivalentSameIDS;
     idsdb->config.fuzzyMatch.defaultRegion    = defaultRegion;
     ParseLocaleSuffixFallbackOrder(localeSuffixFallbackOrder, idsdb->config.fuzzyMatch.localeSuffixFallbackOrder);
     // Show all children items
@@ -175,9 +177,11 @@ void IDSui::CreateRBFilters() {
     rbFilterAll.set_group(rgFilter);
     rbFilterLcSuffix.set_group(rgFilter);
     rbFilterLocale.set_group(rgFilter);
+    rbFilterLocaleKeepIVS.set_group(rgFilter);
     r4Box.pack_start(rbFilterAll, Gtk::PACK_SHRINK);
     r4Box.pack_start(rbFilterLcSuffix, Gtk::PACK_SHRINK);
     r4Box.pack_start(rbFilterLocale, Gtk::PACK_SHRINK);
+    r4Box.pack_start(rbFilterLocaleKeepIVS, Gtk::PACK_SHRINK);
     r4Box.pack_start(cbIgnoreOverlay, Gtk::PACK_SHRINK);
     r4Box.pack_start(labelUnification, Gtk::PACK_SHRINK);
     r4Box.pack_start(cbUnification, Gtk::PACK_SHRINK);
@@ -208,6 +212,9 @@ void IDSui::CreateRBFilters() {
     });
     rbFilterLocale.signal_toggled().connect([this]() {
         if(rbFilterLocale.get_active()) onQueryOptionsChanged();
+    });
+    rbFilterLocaleKeepIVS.signal_toggled().connect([this]() {
+        if(rbFilterLocaleKeepIVS.get_active()) onQueryOptionsChanged();
     });
     cbIgnoreOverlay.signal_toggled().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
     cbShowDetails.signal_toggled().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
@@ -261,6 +268,7 @@ void IDSui::ReadConfigFile() {
         selectedDB                = "";
         defaultRegion             = "";
         localeSuffixFallbackOrder = "";
+        excludeNonEquivalentSameIDS = true;
         unificationLevel          = IWDS_UNIFICATION_NONE;
         tomlCfg                   = {
             {                  "fontCfg",         FONTCFG_DEFAULT},
@@ -269,6 +277,7 @@ void IDSui::ReadConfigFile() {
             {               "selectedDB",                      ""},
             {            "defaultRegion",                      ""},
             {"localeSuffixFallbackOrder",                      ""},
+            {"excludeNonEquivalentSameIDS",                 true},
             {         "unificationLevel",                  "none"},
         };
         std::ofstream outputCfg("./db/config.toml");
@@ -282,6 +291,7 @@ void IDSui::ReadConfigFile() {
     selectedDB                              = toml::find_or<std::string>(tomlCfg, "selectedDB", "");
     defaultRegion                           = toml::find_or<std::string>(tomlCfg, "defaultRegion", "");
     localeSuffixFallbackOrder               = toml::find_or<std::string>(tomlCfg, "localeSuffixFallbackOrder", "");
+    excludeNonEquivalentSameIDS             = toml::find_or<bool>(tomlCfg, "excludeNonEquivalentSameIDS", true);
     const std::string configuredUnification = toml::find_or<std::string>(tomlCfg, "unificationLevel", "none");
     if(!ParseIWDSUnificationLevel(configuredUnification, unificationLevel)) unificationLevel = IWDS_UNIFICATION_NONE;
 }
@@ -292,6 +302,7 @@ void IDSui::WriteConfigFile() {
     tomlCfg["selectedDB"]                = selectedDB;
     tomlCfg["defaultRegion"]             = defaultRegion;
     tomlCfg["localeSuffixFallbackOrder"] = localeSuffixFallbackOrder;
+    tomlCfg["excludeNonEquivalentSameIDS"] = excludeNonEquivalentSameIDS;
     tomlCfg["unificationLevel"]          = IWDSUnificationLevelName(unificationLevel);
     std::ofstream outputCfg("./db/config.toml");
     outputCfg << tomlCfg;
@@ -323,6 +334,7 @@ void IDSui::onQuery() {
     rbFilterAll.set_sensitive(false);
     rbFilterLcSuffix.set_sensitive(false);
     rbFilterLocale.set_sensitive(false);
+    rbFilterLocaleKeepIVS.set_sensitive(false);
     cbIgnoreOverlay.set_sensitive(false);
     cbUnification.set_sensitive(false);
     cbShowDetails.set_sensitive(false);
@@ -424,6 +436,7 @@ void IDSui::onQueryFinished() {
     rbFilterAll.set_sensitive(true);
     rbFilterLcSuffix.set_sensitive(true);
     rbFilterLocale.set_sensitive(true);
+    rbFilterLocaleKeepIVS.set_sensitive(true);
     cbIgnoreOverlay.set_sensitive(true);
     cbUnification.set_sensitive(true);
     cbShowDetails.set_sensitive(true);
@@ -440,7 +453,9 @@ IDSqueryOptions IDSui::GetQueryOptions() const {
     if(rbFilterLcSuffix.get_active())
         options.filter.resultFilter = IDS_RESULT_IGNORE_LC_SUFFIX;
     else if(rbFilterLocale.get_active())
-        options.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES;
+        options.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY;
+    else if(rbFilterLocaleKeepIVS.get_active())
+        options.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES_KEEP_IVS;
     ParseLocaleSuffixFallbackOrder(localeSuffixFallbackOrder, options.filter.localeSuffixFallbackOrder);
     ParseIDSglyphDomain(std::string(cbGlyphDomain.get_active_id()), options.filter.glyphDomain);
     options.filter.unicodeBlocks = selectedUnicodeBlocks_;
@@ -567,6 +582,7 @@ void IDSui::onMenuDatabase() {
     if(result == Gtk::RESPONSE_OK) {
         std::unique_ptr<IDSdatabase> newDB(new IDSdatabase(selectedDB));
         newDB->config.fuzzyMatch.unificationLevel = unificationLevel;
+        newDB->config.fuzzyMatch.excludeNonEquivalentSameIDS = excludeNonEquivalentSameIDS;
         ParseLocaleSuffixFallbackOrder(localeSuffixFallbackOrder, newDB->config.fuzzyMatch.localeSuffixFallbackOrder);
         newDB->config.fuzzyMatch.defaultRegion    = defaultRegion;
         // std::cout << "Read OK" << std::endl;
@@ -593,7 +609,8 @@ void IDSui::onMenuSettings() {
     buttonBox.add(ok);
     buttonBox.set_layout(Gtk::BUTTONBOX_END);
     Gtk::Frame       findFrame("Querying Settings"), displayFrame("Display Settings");
-    Gtk::CheckButton symFallback("Character fallback"), suffixRisAltForm("Suffix \"r\" is an alternate ideograph");
+    Gtk::CheckButton symFallback("Character fallback"), suffixRisAltForm("Suffix \"r\" is an alternate ideograph"),
+        excludeNonEquivalentSameIDS("Exclude non-equivalent same-IDS variants");
     Gtk::Entry       defaultRegion, localeSuffixOrder, fontCfg;
     Gtk::SpinButton  querySize, resultSize;
     Glib::RefPtr<Gtk::Adjustment> queryAdj, resultAdj;
@@ -610,6 +627,7 @@ void IDSui::onMenuSettings() {
     displayFrame.add(displayFBox);
     findFBox.pack_start(symFallback, Gtk::PACK_SHRINK);
     findFBox.pack_start(suffixRisAltForm, Gtk::PACK_SHRINK);
+    findFBox.pack_start(excludeNonEquivalentSameIDS, Gtk::PACK_SHRINK);
     findFBox.pack_start(defaultRegionBox, Gtk::PACK_SHRINK);
     defaultRegionBox.pack_start(defaultRegionLabel, Gtk::PACK_SHRINK);
     defaultRegionBox.pack_start(defaultRegion, Gtk::PACK_SHRINK);
@@ -630,6 +648,7 @@ void IDSui::onMenuSettings() {
     resultSize.set_adjustment(resultAdj);
     symFallback.set_active(idsdb->config.misc.symFallback);
     suffixRisAltForm.set_active(idsdb->config.misc.suffixRisAltForm);
+    excludeNonEquivalentSameIDS.set_active(idsdb->config.fuzzyMatch.excludeNonEquivalentSameIDS);
     localeSuffixOrder.set_text(this->localeSuffixFallbackOrder);
     defaultRegion.set_text(idsdb->config.fuzzyMatch.defaultRegion);
     fontLabel.set_line_wrap();
@@ -654,9 +673,11 @@ void IDSui::onMenuSettings() {
         IDSdbConfig& activeConfig             = idsdb->config;
         activeConfig.misc.symFallback         = symFallback.get_active();
         activeConfig.misc.suffixRisAltForm    = suffixRisAltForm.get_active();
+        this->excludeNonEquivalentSameIDS     = excludeNonEquivalentSameIDS.get_active();
         this->defaultRegion                   = defaultRegion.get_text();
         this->localeSuffixFallbackOrder       = localeSuffixOrder.get_text();
         activeConfig.fuzzyMatch.defaultRegion = this->defaultRegion;
+        activeConfig.fuzzyMatch.excludeNonEquivalentSameIDS = this->excludeNonEquivalentSameIDS;
         activeConfig.fuzzyMatch.localeSuffixFallbackOrder = parsedLocaleOrder;
         queryFontSize                         = querySize.get_value();
         resultFontSize                        = resultSize.get_value();
@@ -757,11 +778,15 @@ void IDSui::onSelectDBfile() {
 ShowDialog:
     int result = dialog->run();
     if(result == Gtk::RESPONSE_OK && filename.size() != 0) {
-        std::unique_ptr<IDSdatabase> parseDB(new IDSdatabase(entry.get_text()));
+        std::unique_ptr<IDSdatabase> parseDB(new IDSdatabase(entry.get_text(), IDSdbOpenMode::StartEmpty));
         IDSdbFormat                  selectedMode = IDSDB_DEFAULT;
         if(dbType.get_active_id() == "yibai") selectedMode = IDSDB_YIBAI;
         try {
-            const int importResult = parseDB->ImportDB(filename, selectedMode);
+            const IDSImportStageCallback showStage = [&](IDSimportStage stage) {
+                r5label.set_text(IDSImportStageName(stage));
+                while(Gtk::Main::events_pending()) Gtk::Main::iteration();
+            };
+            const int importResult = parseDB->ImportDB(filename, selectedMode, showStage);
             if(importResult != 0) {
                 const std::string& error       = parseDB->GetLastError();
                 std::string        importError = error.empty() ? "Unable to import the IDS database." : error;
@@ -820,9 +845,14 @@ void IDSui::onSelectPrivateDBfile(bool replaceExisting) {
         return;
     }
 
-    const IDSdbFormat formatType   = format.get_active_id() == "yibai" ? IDSDB_YIBAI : IDSDB_DEFAULT;
-    const int         importResult = replaceExisting ? idsdb->ReimportPrivateDB(fileDialog.get_filename(), formatType)
-                                                     : idsdb->ImportPrivateDB(fileDialog.get_filename(), formatType);
+    const IDSdbFormat formatType = format.get_active_id() == "yibai" ? IDSDB_YIBAI : IDSDB_DEFAULT;
+    const IDSImportStageCallback showStage = [&](IDSimportStage stage) {
+        formatLabel.set_text(IDSImportStageName(stage));
+        while(Gtk::Main::events_pending()) Gtk::Main::iteration();
+    };
+    const int importResult = replaceExisting
+        ? idsdb->ReimportPrivateDB(fileDialog.get_filename(), formatType, showStage)
+        : idsdb->ImportPrivateDB(fileDialog.get_filename(), formatType, showStage);
     if(importResult != 0) {
         const std::string& errorText   = idsdb->GetLastError();
         std::string        importError = errorText.empty() ? "The private IDS source was rejected." : errorText;

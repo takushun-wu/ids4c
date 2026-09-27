@@ -43,12 +43,15 @@ GLYPH 可以是实际字符、U+XXXX、0xXXXX 或抽象字形名。
 | --unification-level | none、srcseparation、lv1、lv2 | IWDS 模糊统合等级 |
 | --default-region | 区域字符串 | 精确部件字形不存在时使用的默认区域/后缀 |
 | --locale-suffix-order | `>`、`=` 分隔的后缀列表 | 指定地区后缀的回退顺序；`.` 表示无后缀 |
-| --result-filter | all、ignore-lc-suffix、ignore-other-locales | 结果后缀和区域筛选 |
+| --result-filter | all、ignore-lc-suffix、ignore-other-locales-base-only、ignore-other-locales-keep-ivs | 结果后缀和区域筛选 |
+| --disable-same-ids-exclusion | 无值 | 允许被 `{字}` 唯一化标记区分的同 IDS 字形互相匹配 |
 | --glyph-domain | all、unicode、private、abstract | 字形域筛选 |
 | --unicode-block | 逗号分隔 | Unicode 区块筛选 |
 | --ignore-overlay | 无值 | 忽略匹配路径使用 ⿻ 的结果 |
 
 --unicode-block 支持 all、cjk、basic、ext-a 至 ext-j、compatibility、radicals、strokes、private-bmp、private-plane15、private-plane16、abstract 和 other。
+
+`ignore-other-locales-base-only` 将同一基码位的所有 IVS 变体视为一个结果；`ignore-other-locales-keep-ivs` 将「基码位 + 异体字选择符」（包括没有选择符）分别视为独立结果。严格 locale 筛选只在本次查询实际命中的字形中选择，`--locale-suffix-order` 不会令未命中的基础字形参与筛选。旧值 `ignore-other-locales` 已不再接受。
 
 ## 输出格式
 
@@ -112,11 +115,11 @@ New-Item -ItemType Directory -Force db
   --format default
 ```
 
-导入失败时，CLI 会输出错误信息以及输入行、IDS 序号和字符位置等诊断信息。
+IDS 导入时，CLI 会向标准错误输出当前阶段（读取、HV 缓存、笔画中性缓存、部件索引、笔画数、保存和完成）。导入失败时，还会输出输入行、IDS 序号和字符位置等诊断信息。
 
 ### 导入后的缓存
 
-IDS 导入成功后会从原始表达式生成 HV 查询缓存和笔画中性组合缓存。原始 IDS 与派生缓存都写入同一个 SQLite 数据库；缓存不应手工编辑。私有库追加或重新导入时，受影响字形的缓存会增量更新。
+IDS 导入成功后会从原始表达式生成 HV 查询缓存、笔画中性组合缓存和一级部件倒排索引。原始 IDS 与派生数据都写入同一个 SQLite 数据库；缓存和索引不应手工编辑。私有库追加或重新导入时，受影响字形的缓存和索引会更新。缺失或旧版部件索引会在加载数据库时重建或迁移。
 
 如果原始数据库来自新的 `ids_lv0.txt` 或者缓存内容与输入文件不一致，可以重新导入数据库；C++ API 还提供 `RebuildQueryCache()` 供上层程序从当前原始 IDS 重建缓存。导入报告会给出接受的表达式数、缓存条目数、缓存截断数以及错误列表。
 ## 查询示例
@@ -144,7 +147,7 @@ IWDS lv2 详细查询：
 ```powershell
 .\build\ids4c-cli.exe `
   --database yibai0 `
-  --result-filter ignore-other-locales `
+  --result-filter ignore-other-locales-keep-ivs `
   --glyph-domain unicode `
   --unicode-block "basic,ext-a" `
   --ignore-overlay `

@@ -67,13 +67,16 @@ namespace {
             filter = IDS_RESULT_IGNORE_LC_SUFFIX;
             return true;
         }
-        if(value == "ignore-other-locales") {
-            filter = IDS_RESULT_IGNORE_OTHER_LOCALES;
+        if(value == "ignore-other-locales-base-only") {
+            filter = IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY;
+            return true;
+        }
+        if(value == "ignore-other-locales-keep-ivs") {
+            filter = IDS_RESULT_IGNORE_OTHER_LOCALES_KEEP_IVS;
             return true;
         }
         return false;
     }
-
     bool ParseGlyphArgument(const std::string& value, Ideograph& glyph) {
         if(value.size() > 2 &&
             ((value[0] == 'U' && value[1] == '+') || (value[0] == '0' && (value[1] == 'x' || value[1] == 'X')))) {
@@ -391,9 +394,10 @@ int main(int argc, char** argv) {
         "ignore-overlay", "Ignore candidates whose matching path uses an overlay structure.")(
         "locale-suffix-order", po::value<std::string>()->default_value(""),
         "Locale suffix fallback order; use > for fallback and = for same-level suffixes, for example C=G>.=H.")(
+        "disable-same-ids-exclusion", "Allow same-IDS variants marked with {glyph} to match each other.")(
         "no-match-paths", "Do not calculate match paths in detailed output.")("result-filter",
         po::value<std::string>()->default_value("all"),
-        "all, ignore-lc-suffix, or ignore-other-locales.")("glyph-domain",
+        "all, ignore-lc-suffix, ignore-other-locales-base-only, or ignore-other-locales-keep-ivs.")("glyph-domain",
         po::value<std::string>()->default_value("all"), "Glyph domain: all, unicode, private, or abstract.")(
         "unicode-block", po::value<std::string>()->default_value("all"),
         "Unicode blocks, comma separated: all, cjk, basic, ext-a..ext-j, compatibility, radicals, strokes, private-bmp, private-plane15, private-plane16, abstract, or other.")(
@@ -473,7 +477,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        IDSdatabase database(databaseName);
+        IDSdatabase database(databaseName, hasImport ? IDSdbOpenMode::StartEmpty : IDSdbOpenMode::LoadExisting);
         if((hasPrivateImport || hasPrivateReimport) && database.isEmpty()) {
             const std::string& error = database.GetLastError();
             std::cerr << (error.empty() ? "Database is empty or unavailable." : error) << std::endl;
@@ -483,9 +487,12 @@ int main(int argc, char** argv) {
         const std::string source       = hasImport ? values["import"].as<std::string>()
             : hasPrivateImport                     ? values["import-private"].as<std::string>()
                                                    : values["reimport-private"].as<std::string>();
-        const int         importResult = hasImport ? database.ImportDB(source, importFormat)
-            : hasPrivateImport                     ? database.ImportPrivateDB(source, importFormat)
-                                                   : database.ReimportPrivateDB(source, importFormat);
+        const IDSImportStageCallback showStage = [](IDSimportStage stage) {
+            std::cerr << "[import] " << IDSImportStageName(stage) << std::endl;
+        };
+        const int importResult = hasImport ? database.ImportDB(source, importFormat, showStage)
+            : hasPrivateImport              ? database.ImportPrivateDB(source, importFormat, showStage)
+                                            : database.ReimportPrivateDB(source, importFormat, showStage);
         if(importResult != 0) {
             const std::string& error = database.GetLastError();
             std::cerr << (error.empty() ? "Unable to import the IDS source file." : error) << std::endl;
@@ -565,6 +572,7 @@ int main(int argc, char** argv) {
     IDSdatabase database(databaseName);
     database.config.fuzzyMatch.defaultRegion    = values["default-region"].as<std::string>();
     database.config.fuzzyMatch.unificationLevel = unificationLevel;
+    database.config.fuzzyMatch.excludeNonEquivalentSameIDS = values.count("disable-same-ids-exclusion") == 0;
     database.config.fuzzyMatch.localeSuffixFallbackOrder = queryOptions.filter.localeSuffixFallbackOrder;
     if(database.isEmpty()) {
         const std::string& error = database.GetLastError();

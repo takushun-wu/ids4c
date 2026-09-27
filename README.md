@@ -30,12 +30,14 @@ The project source code is licensed under the Apache License, Version 2.0; see [
 - Stroke conditions `<stroke=...>` and remaining-stroke conditions `<residue=...>`;
 - Approximate stroke ranges with `~`, for example `<stroke=21~1>` and `<residue=12~2>`;
 - Multiple HVExtract alternatives and same-IDS expression grouping;
+- First-level component indexing for `<search=...>` candidate filtering, without changing final match semantics;
+- Same-IDS uniqueness markers (`{glyph}`) are respected by default;
 - U+1F504 (🔄) replacement queries;
 - Optional filtering of overlay structures represented by ⿻;
 - Unicode-block, private-use, abstract-glyph, and custom-range filtering;
 - Detailed match paths, equivalent-query indexes, and preprocessing-rule information.
 
-When IDS data is imported, ids4c keeps both the original IDS expressions and derived query caches. The HVExtract cache is used by structural and component queries; the stroke-neutral composition cache allows components with lowercase stroke suffixes to participate in composition lookup without changing the data returned by `raw_ids()`. Reimporting private data or rebuilding the cache regenerates these derived caches from the raw IDS.
+When IDS data is imported, ids4c keeps both the original IDS expressions and derived query caches. The HVExtract cache is used by structural and component queries; the stroke-neutral composition cache allows components with lowercase stroke suffixes to participate in composition lookup without changing the data returned by `raw_ids()`. A first-level component index for raw, HV, and stroke-neutral expressions is also stored in SQLite. It narrows search candidates conservatively; final matches still use the normal matcher. Missing or older indexes are rebuilt or migrated when the database is loaded. Reimporting private data or rebuilding the cache regenerates these derived caches from the raw IDS.
 
 ### IWDS fuzzy unification
 

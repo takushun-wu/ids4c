@@ -28,7 +28,17 @@
  */
 typedef enum { IDSDB_DEFAULT, IDSDB_YIBAI } IDSdbFormat;
 
-typedef enum { IDS_RESULT_ALL, IDS_RESULT_IGNORE_LC_SUFFIX, IDS_RESULT_IGNORE_OTHER_LOCALES } IDSresultFilter;
+// 完整重新导入可跳过加载将被覆盖的旧库；私有库导入仍须加载现有库。
+enum class IDSdbOpenMode { LoadExisting, StartEmpty };
+
+typedef enum {
+    IDS_RESULT_ALL,
+    IDS_RESULT_IGNORE_LC_SUFFIX,
+    // Strict locale filtering; all IVS variants of a base code point share one result.
+    IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY,
+    // Strict locale filtering; different variation selectors are independent results.
+    IDS_RESULT_IGNORE_OTHER_LOCALES_KEEP_IVS,
+} IDSresultFilter;
 
 // 解析地区后缀回退顺序；'>' 表示下一级，'=' 表示同级，例如 C=G>.=H；"." 表示无后缀。
 // 顺序由上层程序提供，不在数据库或库内部写死。
@@ -143,7 +153,7 @@ struct IDSFilterOptions {
     IDSglyphDomain               glyphDomain            = IDS_GLYPH_DOMAIN_ALL;
     std::vector<IDSunicodeBlock> unicodeBlocks;
     std::vector<std::string>     customRanges;
-    // 仅在 IDS_RESULT_IGNORE_OTHER_LOCALES 下生效；未列出的后缀排在已列出的后缀之后。
+    // 仅在两种严格 locale 筛选模式下生效；未列出的后缀排在已列出的后缀之后。
     // 使用 '>' 表示回退到下一级，使用 '=' 表示同一级，例如 C=G>.=H。
     // 由于历史 API 使用 vector，解析后的同级组以一个字符串保存，如 {"C=G", ".=H"}。
     std::vector<std::string>     localeSuffixFallbackOrder;
@@ -194,9 +204,6 @@ typedef struct {
     std::string suffix;
 } VSandSuffix;
 
-typedef struct {
-    bool hasBaseGlyph = false;
-} GlyphLocaleInfo;
 
 /// IWDS 和 YiBai 模糊匹配配置。
 struct IDSFuzzyMatchOptions {
@@ -204,6 +211,8 @@ struct IDSFuzzyMatchOptions {
     // Use the derived cache that treats lowercase stroke suffixes as neutral.
     // Raw and HV definitions remain unchanged.
     bool strokeNeutralComposition = true;
+    // 默认尊重原始 IDS 中的 {字} 唯一化标记；关闭后 same-ids 变体可以互认。
+    bool excludeNonEquivalentSameIDS = true;
     std::string          defaultRegion; // YiBai 部件 fallback 区域。
     // 可选的 FindIDS 地区后缀回退顺序；为空时保持现有 lv0/传统回退行为。
     // '>' 表示回退到下一级，'=' 表示同一级；无后缀可写作 '.'，例如 C=G>.=H。
@@ -266,6 +275,19 @@ using IDSImportRecordCallback = std::function<bool(const IDSImportRecord& record
 using IDSImportReader         = std::function<bool(
     const IDSImportRecordCallback& emit, std::string& error)>;
 
+// 导入阶段按顺序同步通知；每个阶段不提供百分比进度。
+enum class IDSimportStage {
+    Reading,
+    HVCache,
+    StrokeNeutralCache,
+    ComponentIndex,
+    StrokeCache,
+    Saving,
+    Complete,
+};
+using IDSImportStageCallback = std::function<void(IDSimportStage)>;
+const char* IDSImportStageName(IDSimportStage stage);
+
 /**
  * @brief IDS 数据库的主要公共对象。
  *
@@ -299,6 +321,7 @@ private:
     using SameIDSHashIndex = std::unordered_map<uint64_t, std::vector<SameIDSHashGroup>>;
     // 一个字形可以有多个原始 IDS；集合之间不做传递合并。
     using SameIDSVariantIndex = std::unordered_map<Ideograph, std::vector<Ideograph>, Ideograph_Hash>;
+    using DirectComponentIndex = std::unordered_map<std::string, IdeographSet>;
 
     // 原始 IDS 是可追溯的 lv0 基线，笔画数也只从这里推导。
     IDSStorage _rawIDSDB;
@@ -308,10 +331,15 @@ private:
     // Derived cache used only by matching and component search, never by FindIDS/HV extraction.
     IDSStorage _strokeNeutralCompositionDB;
     IDSStorage _idsDB;
+    // 原始/HV/笔画中性表达式的一级部件倒排；只用于保守候选筛选。
+    std::array<DirectComponentIndex, 3> _directComponentIndex;
+    bool _directComponentIndexReady = false;
     // 标记可被增量更新的私有扩展字形，基础 IDS 不可被私有导入覆盖。
     IdeographSet                                              _privateGlyphs;
     // Strict raw-IDS duplicate index. The expression text guards hash collisions.
     SameIDSHashIndex                                          _sameIDSHashIndex;
+    // Same expression 的完整反向索引；在关闭唯一化排除时使用。
+    SameIDSVariantIndex                                       _sameIDSAllVariantIndex;
     SameIDSVariantIndex                                       _sameIDSVariantIndex;
     std::unordered_map<std::string, std::vector<std::string>> _strokeDB;
     std::unordered_map<std::string, std::string>              _strokeRevDB;
@@ -346,8 +374,6 @@ private:
 
     std::unordered_set<Ideograph, Ideograph_Hash>                           _cache_BasicIdeo;
     std::unordered_map<Ideograph, std::vector<VSandSuffix>, Ideograph_Hash> _cache_IdeoSuffixLookup;
-    // Cache whether a code point has a suffixless base glyph for locale filtering.
-    std::unordered_map<Ideograph, GlyphLocaleInfo, Ideograph_Hash> _cache_GlyphLocale;
 
     std::unordered_set<Ideograph, Ideograph_Hash> _iterStack;
     // Query-local bindings for <var=...>. They are cleared for every candidate glyph.
@@ -366,11 +392,14 @@ private:
 
     bool LoadSqliteDatabase(const std::string& filename);
     bool SaveSqliteDatabase(const std::string& filename);
+    bool UpgradeComponentIndexSqlite(const std::string& filename, bool hasLegacyIndex);
     bool SaveStrokeCountCache(const std::string& filename);
     bool LoadUnifiableSqlite(const std::string& filename);
     bool SaveUnifiableSqlite(const std::string& filename);
     void BuildUnificationGroupIndexes();
     void BuildUnificationIDSGroupIndexes();
+    void BuildDirectComponentIndex();
+    bool FindIndexedSearchCandidates(IDS* query, IdeographSet& candidates);
 
     void           MakeStrokeDB();
     void           MakeStrokeRevDB();
@@ -382,20 +411,24 @@ private:
     bool             MatchStrokeCount(IDS* ids, SearchParam* query);
     bool           AddRawIDS(Ideograph ideo, IDSOwner ids, std::string uniqueSeparator = "");
     void           BuildSameIDSHashIndex();
+    const SameIDSVariantIndex& GetSameIDSVariantIndex() const;
     IDSOwnerList ExpandSameIDSQuery(IDS* ids, size_t maximum = 64);
     void           ResetRuntimeCaches();
     bool           IsHVAmbiguousOrigin(Ideograph glyph) const;
-    bool           BuildQueryCacheFromRaw();
+    bool           IsNonEquivalentSameIDS(Ideograph first, Ideograph second) const;
+    bool           BuildQueryCacheFromRaw(const IDSImportStageCallback& progress = {});
     void           BuildQueryCacheForGlyphs(const IdeographSet& glyphs, IDSStorage& output);
     void           BuildStrokeNeutralCompositionCacheForGlyphs(const IdeographSet& glyphs, IDSStorage& output);
     void           CollectReferencedIdeographs(IDS* ids, IdeographSet& references) const;
     IdeographSet   FindAffectedCacheGlyphs(const IdeographSet& changedGlyphs) const;
-    void           RebuildAffectedQueryCache(const IdeographSet& changedGlyphs);
+    void           RebuildAffectedQueryCache(
+        const IdeographSet& changedGlyphs, const IDSImportStageCallback& progress = {});
     bool           ParseIDSFile(const std::string& filename, IDSdbFormat dbformat, IDSStorage& output,
         IDSUniqueSeparatorStorage& uniqueSeparators);
     bool           ParseIDSReader(const IDSImportReader& reader, IDSStorage& output,
         IDSUniqueSeparatorStorage& uniqueSeparators);
-    int            ImportPrivateDBImpl(IDSImportReader reader, IDSdbFormat dbformat, bool replaceExisting);
+    int            ImportPrivateDBImpl(IDSImportReader reader, IDSdbFormat dbformat, bool replaceExisting,
+        const IDSImportStageCallback& progress);
     IDSOwnerList   HVExtractAlternativesInternal(
         IDS* ids, bool firstLayer, bool preserveAmbiguousGlyphs, size_t maximum, bool& truncated);
     // 从当前查询缓存中查找；构建缓存时会临时指向原始 IDS。
@@ -409,6 +442,9 @@ private:
     bool     MatchIWDSUnificationPattern(IDS* candidate, IDS* pattern, bool querySide);
     uint32_t CJKsymFallback(uint32_t cp) const;
     bool     IsSingleStrokeIdeograph(const Ideograph& ideograph);
+    // <search=单笔画> 可以命中 #(...) 中作为独立 token 出现的笔画字形。
+    bool     MatchSingleStrokeToken(const Stroke_Data& token, const Ideograph& query);
+    bool     MatchSingleStrokeSearchTerm(Stroke* stroke, const Ideograph& query);
     bool     ContainsOverlay(IDS* ids) const;
     void     AppendSameIDSMatches(IDS* ids, const IDSqueryOptions& options, std::vector<Ideograph>& output);
     bool     ShouldIncludeResult(Ideograph ideograph, const IDSqueryOptions& options) const;
@@ -417,6 +453,7 @@ private:
     bool IDSarrayMatch(const std::vector<IDS*>& s, const std::vector<IDS*>& p, IDCtype arrangement,
         size_t sIdx = 0, size_t pIdx = 0);
     bool IDSmatch(IDS* idsInDB, IDS* ids, bool surroundEqual = true);
+    bool MatchIDSUnscoped(IDS* idsInDB, IDS* ids, bool surroundEqual = true);
     bool MatchVariable(IDS* idsInDB, IDSVariable* variable);
     bool MatchVariableRange(const std::vector<IDS*>& candidates, IDSVariable* variable, IDCtype arrangement);
     bool VariableBindingEquivalent(const VariableBinding& binding, IDS* candidate);
@@ -431,6 +468,8 @@ private:
     bool MatchSearchTerms(IDS* idsInDB, const IDSOwnerList& terms);
     bool CanMatchIWDSShape(IDS* idsInDB, IDS* term) const;
     bool MatchSearchTermCached(IDS* idsInDB, IDS* term);
+    bool HasMatchingHVOrigin(const Pattern* candidate, const Ideograph& query) const;
+    bool HasForeignHVOrigin(const Pattern* candidate, const Ideograph& query) const;
     bool MatchIdeograph(IDS* idsInDB, IDS* ids);
     bool MatchStroke(IDS* idsInDB, IDS* ids);
     bool MatchPattern(IDS* idsInDB, IDS* ids, bool surroundEqual);
@@ -440,6 +479,7 @@ private:
     IDSOwnerList              BuildSubtractQueries(Pattern* subtractQuery);
     IDSOwnerList              ExpandQueryOnlyTerm(IDS* term);
     std::vector<IDSOwnerList> ExpandQueryOnlyTerms(const IDSOwnerList& terms);
+    IDSOwner                   PreprocessReplaceSubtractQuery(IDS* ids, size_t maximum);
     IDSOwnerList              ExpandIWDSQuery(IDS* ids, size_t maximum = 64);
     IDSOwnerList              BuildEquivalentQueryOwners(IDS* ids, size_t maximum = 64);
     IDSOwnerList              BuildComponentVariants(Ideograph component);
@@ -473,6 +513,7 @@ public:
     IDSdbConfig config;
 
     IDSdatabase(std::string name);
+    IDSdatabase(std::string name, IDSdbOpenMode mode);
     ~IDSdatabase();
 
     // [稳定 API：筛选配置]
@@ -486,15 +527,21 @@ public:
     void MakeCache();
 
     // [稳定 API：数据库导入]
-    int ImportDB(std::string filename, IDSdbFormat dbformat = IDSDB_DEFAULT);
+    int ImportDB(std::string filename, IDSdbFormat dbformat = IDSDB_DEFAULT,
+        IDSImportStageCallback progress = {});
     // 第三方可通过读取器导入任意格式；读取器只负责产生统一 IDSimportRecord。
-    int ImportDB(IDSImportReader reader, IDSdbFormat dbformat = IDSDB_DEFAULT);
+    int ImportDB(IDSImportReader reader, IDSdbFormat dbformat = IDSDB_DEFAULT,
+        IDSImportStageCallback progress = {});
     // 增量导入私有扩展字形；输入存在任一无效 IDS 时不修改数据库。
-    int ImportPrivateDB(std::string filename, IDSdbFormat dbformat = IDSDB_DEFAULT);
-    int ImportPrivateDB(IDSImportReader reader, IDSdbFormat dbformat = IDSDB_DEFAULT);
+    int ImportPrivateDB(std::string filename, IDSdbFormat dbformat = IDSDB_DEFAULT,
+        IDSImportStageCallback progress = {});
+    int ImportPrivateDB(IDSImportReader reader, IDSdbFormat dbformat = IDSDB_DEFAULT,
+        IDSImportStageCallback progress = {});
     // 以通过校验的文件替换数据库中全部既有私有扩展字形。
-    int ReimportPrivateDB(std::string filename, IDSdbFormat dbformat = IDSDB_DEFAULT);
-    int ReimportPrivateDB(IDSImportReader reader, IDSdbFormat dbformat = IDSDB_DEFAULT);
+    int ReimportPrivateDB(std::string filename, IDSdbFormat dbformat = IDSDB_DEFAULT,
+        IDSImportStageCallback progress = {});
+    int ReimportPrivateDB(IDSImportReader reader, IDSdbFormat dbformat = IDSDB_DEFAULT,
+        IDSImportStageCallback progress = {});
 
     // [稳定 API：导入状态]
     const IDSimportReport& GetLastImportReport() const { return _lastImportReport; }

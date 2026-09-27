@@ -43,6 +43,9 @@ static std::string SQLiteColumnText(sqlite3_stmt* statement, int column) {
     return text == nullptr ? "" : reinterpret_cast<const char*>(text);
 }
 
+static bool SQLiteTableExists(sqlite3* database, const char* tableName);
+static constexpr const char* kComponentIndexVersion = "2";
+
 
 // SQLite 中的 raw_ids_text 保存完整的根部唯一化前缀，加载时单独提取。
 static std::string SQLiteLeadingUniqueSeparator(const std::string& expression) {
@@ -151,6 +154,7 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
     std::string formatName;
     std::string schemaVersion;
     std::string hvCacheVersion;
+    std::string componentIndexVersion;
     {
         SQLiteStatement formatStatement(database, "SELECT value FROM metadata WHERE key = 'format'");
         SQLiteStatement schemaStatement(database, "SELECT value FROM metadata WHERE key = 'schema_version'");
@@ -167,6 +171,9 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         SQLiteStatement cacheVersionStatement(database, "SELECT value FROM metadata WHERE key = 'hv_cache_version'");
         if(cacheVersionStatement.valid() && sqlite3_step(cacheVersionStatement.get()) == SQLITE_ROW)
             hvCacheVersion = SQLiteColumnText(cacheVersionStatement.get(), 0);
+        SQLiteStatement indexVersionStatement(database, "SELECT value FROM metadata WHERE key = 'component_index_version'");
+        if(indexVersionStatement.valid() && sqlite3_step(indexVersionStatement.get()) == SQLITE_ROW)
+            componentIndexVersion = SQLiteColumnText(indexVersionStatement.get(), 0);
     }
     IDSdbFormat format = IDSDB_DEFAULT;
     if(ok && !ParseDatabaseFormat(formatName, format)) {
@@ -320,10 +327,53 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
             }
         }
     }
+    bool upgradeComponentIndex = false;
+    bool hasLegacyComponentIndex = false;
+    if(ok && !rebuildHVCache) {
+        bool loadedIndex = false;
+        const int allowedMask = (1 << _directComponentIndex.size()) - 1;
+        if(SQLiteTableExists(database, "query_component_postings") &&
+            (componentIndexVersion == "1" || componentIndexVersion == kComponentIndexVersion)) {
+            const bool legacy = componentIndexVersion == "1";
+            SQLiteStatement indexStatement(database, legacy
+                    ? "SELECT p.source_kind, p.component_key, glyphs.glyph_key "
+                      "FROM query_component_postings AS p JOIN glyphs ON glyphs.id = p.glyph_id"
+                    : "SELECT p.source_mask, p.component_key, glyphs.glyph_key "
+                      "FROM query_component_postings AS p JOIN glyphs ON glyphs.id = p.glyph_id");
+            if(indexStatement.valid()) {
+                int result = SQLITE_ROW;
+                while((result = sqlite3_step(indexStatement.get())) == SQLITE_ROW) {
+                    const int value = sqlite3_column_int(indexStatement.get(), 0);
+                    const int mask = legacy
+                        ? (value >= 0 && value < static_cast<int>(_directComponentIndex.size()) ? 1 << value : 0)
+                        : value;
+                    if(mask <= 0 || (mask & ~allowedMask) != 0) break;
+                    const std::string key = SQLiteColumnText(indexStatement.get(), 1);
+                    const Ideograph glyph(SQLiteColumnText(indexStatement.get(), 2));
+                    for(size_t source = 0; source < _directComponentIndex.size(); source++)
+                        if((mask & (1 << source)) != 0) _directComponentIndex[source][key].insert(glyph);
+                }
+                loadedIndex = result == SQLITE_DONE && !_directComponentIndex[1].empty();
+                hasLegacyComponentIndex = loadedIndex && legacy;
+            }
+        }
+        if(loadedIndex) {
+            _directComponentIndexReady = true;
+        } else {
+            for(auto& source: _directComponentIndex) source.clear();
+            BuildDirectComponentIndex();
+        }
+        const bool knownVersion = componentIndexVersion.empty() || componentIndexVersion == "1" ||
+            componentIndexVersion == kComponentIndexVersion;
+        upgradeComponentIndex = knownVersion && (componentIndexVersion != kComponentIndexVersion || !loadedIndex);
+    }
     sqlite3_close(database);
     if(ok && rebuildHVCache) {
         if(!BuildQueryCacheFromRaw() || !SaveSqliteDatabase(filename))
             ok = false;
+    } else if(ok && upgradeComponentIndex) {
+        // 派生索引升级失败不应使已加载的原始 IDS 和内存索引无法查询。
+        UpgradeComponentIndexSqlite(filename, hasLegacyComponentIndex);
     }
     if(!ok) {
         _rawIDSDB.clear();
@@ -332,7 +382,91 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
     return ok;
 }
 
+bool IDSdatabase::UpgradeComponentIndexSqlite(const std::string& filename, bool hasLegacyIndex) {
+    sqlite3* database = nullptr;
+    if(sqlite3_open_v2(filename.c_str(), &database, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+        if(database != nullptr) sqlite3_close(database);
+        return false;
+    }
+
+    bool ok = SQLiteExecute(database,
+        "PRAGMA foreign_keys = ON;"
+        "BEGIN IMMEDIATE;"
+        "DROP TABLE IF EXISTS query_component_postings_v2;"
+        "CREATE TABLE query_component_postings_v2 ("
+        "  component_key TEXT NOT NULL,"
+        "  glyph_id INTEGER NOT NULL REFERENCES glyphs(id),"
+        "  source_mask INTEGER NOT NULL CHECK(source_mask BETWEEN 1 AND 7),"
+        "  PRIMARY KEY (component_key, glyph_id)"
+        ") WITHOUT ROWID;");
+
+    if(ok && hasLegacyIndex) {
+        ok = SQLiteExecute(database,
+            "INSERT INTO query_component_postings_v2(component_key, glyph_id, source_mask) "
+            "SELECT component_key, glyph_id, SUM(1 << source_kind) "
+            "FROM query_component_postings GROUP BY component_key, glyph_id;");
+    } else if(ok) {
+        std::unordered_map<std::string, sqlite3_int64> glyphIds;
+        SQLiteStatement glyphStatement(database, "SELECT id, glyph_key FROM glyphs");
+        if(!glyphStatement.valid()) ok = false;
+        if(ok) {
+            int result = SQLITE_ROW;
+            while((result = sqlite3_step(glyphStatement.get())) == SQLITE_ROW)
+                glyphIds.emplace(SQLiteColumnText(glyphStatement.get(), 1), sqlite3_column_int64(glyphStatement.get(), 0));
+            ok = result == SQLITE_DONE;
+        }
+
+        SQLiteStatement insertStatement(database,
+            "INSERT INTO query_component_postings_v2(component_key, glyph_id, source_mask) VALUES(?, ?, ?) "
+            "ON CONFLICT(component_key, glyph_id) DO UPDATE SET "
+            "source_mask = source_mask | excluded.source_mask");
+        if(!insertStatement.valid()) ok = false;
+        for(size_t source = 0; source < _directComponentIndex.size() && ok; source++) {
+            for(const auto& posting: _directComponentIndex[source]) {
+                if(!ok) break;
+                for(const Ideograph& glyph: posting.second) {
+                    const auto found = glyphIds.find(glyph.toString());
+                    if(found == glyphIds.end()) {
+                        ok = false;
+                        break;
+                    }
+                    sqlite3_reset(insertStatement.get());
+                    sqlite3_clear_bindings(insertStatement.get());
+                    sqlite3_bind_text(insertStatement.get(), 1, posting.first.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(insertStatement.get(), 2, found->second);
+                    sqlite3_bind_int(insertStatement.get(), 3, 1 << source);
+                    ok = sqlite3_step(insertStatement.get()) == SQLITE_DONE;
+                    if(!ok) break;
+                }
+            }
+        }
+    }
+
+    if(ok)
+        ok = SQLiteExecute(database,
+            "DROP TABLE IF EXISTS query_component_postings;"
+            "ALTER TABLE query_component_postings_v2 RENAME TO query_component_postings;");
+    if(ok) {
+        SQLiteStatement versionStatement(database,
+            "INSERT INTO metadata(key, value) VALUES('component_index_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+        if(!versionStatement.valid())
+            ok = false;
+        else {
+            sqlite3_bind_text(versionStatement.get(), 1, kComponentIndexVersion, -1, SQLITE_STATIC);
+            ok = sqlite3_step(versionStatement.get()) == SQLITE_DONE;
+        }
+    }
+    if(ok) ok = SQLiteExecute(database, "COMMIT;");
+    if(!ok) SQLiteExecute(database, "ROLLBACK;");
+    // VACUUM 在事务提交后收回旧 v1 表的页面；失败不影响已经提交的索引。
+    if(ok) SQLiteExecute(database, "VACUUM;");
+    sqlite3_close(database);
+    return ok;
+}
+
 bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
+    if(!_directComponentIndexReady) BuildDirectComponentIndex();
     // sqlite3_open_v2(...CREATE) 会在失败路径留下空文件。已有有效数据库
     // 保存失败时应由事务回滚；没有有效旧库时则清理这个半成品。
     std::ifstream existingDatabase(filename, std::ios::binary | std::ios::ate);
@@ -356,6 +490,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         // "DROP TABLE IF EXISTS iwds_subtree_index_entries;"
         // "DROP TABLE IF EXISTS iwds_subtree_index_keys;"
         "DROP TABLE IF EXISTS query_stroke_neutral_entries;"
+        "DROP TABLE IF EXISTS query_component_postings;"
         "DROP TABLE IF EXISTS query_ids_entries;"
         "DROP TABLE IF EXISTS ids_same_expression;"
         "DROP TABLE IF EXISTS ids_entries;"
@@ -400,6 +535,12 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         "  ids_text TEXT NOT NULL,"
         "  PRIMARY KEY (glyph_id, ordinal)"
         ");"
+        "CREATE TABLE query_component_postings ("
+        "  component_key TEXT NOT NULL,"
+        "  glyph_id INTEGER NOT NULL REFERENCES glyphs(id),"
+        "  source_mask INTEGER NOT NULL CHECK(source_mask BETWEEN 1 AND 7),"
+        "  PRIMARY KEY (component_key, glyph_id)"
+        ") WITHOUT ROWID;"
         "CREATE TABLE stroke_sequences ("
         "  glyph_id INTEGER PRIMARY KEY REFERENCES glyphs(id),"
         "  sequence TEXT NOT NULL"
@@ -422,10 +563,14 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
             "INSERT INTO ids_same_expression(expression_hash, ids_text, glyph_id, not_equivalent) VALUES(?, ?, ?, ?)");
         SQLiteStatement composedStatement(
             database, "INSERT INTO query_stroke_neutral_entries(glyph_id, ordinal, ids_text) VALUES(?, ?, ?)");
+        SQLiteStatement componentStatement(database,
+            "INSERT INTO query_component_postings(component_key, glyph_id, source_mask) VALUES(?, ?, ?) "
+            "ON CONFLICT(component_key, glyph_id) DO UPDATE SET "
+            "source_mask = source_mask | excluded.source_mask");
         SQLiteStatement privateStatement(database, "INSERT INTO private_glyphs(glyph_id) VALUES(?)");
         SQLiteStatement strokeStatement(database, "INSERT INTO stroke_sequences(glyph_id, sequence) VALUES(?, ?)");
         if(!metadataStatement.valid() || !glyphStatement.valid() || !rawStatement.valid() || !queryStatement.valid() ||
-            !composedStatement.valid() ||
+            !composedStatement.valid() || !componentStatement.valid() ||
             !sameExpressionStatement.valid() || !privateStatement.valid() || !strokeStatement.valid())
             ok = false;
 
@@ -439,6 +584,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         if(ok) ok = insertMetadata("format", DatabaseFormatName(_format));
         if(ok) ok = insertMetadata("schema_version", "6");
         if(ok) ok = insertMetadata("hv_cache_version", "5");
+        if(ok) ok = insertMetadata("component_index_version", kComponentIndexVersion);
 
         std::unordered_map<std::string, sqlite3_int64> glyphIds;
         auto                                           ensureGlyph = [&](const Ideograph& glyph) -> sqlite3_int64 {
@@ -569,12 +715,29 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
                 ok = sqlite3_step(composedStatement.get()) == SQLITE_DONE;
             }
         }
+        for(size_t source = 0; source < _directComponentIndex.size() && ok; source++) {
+            for(const auto& posting: _directComponentIndex[source]) {
+                if(!ok) break;
+                for(const Ideograph& glyph: posting.second) {
+                    const sqlite3_int64 glyphId = ensureGlyph(glyph);
+                    if(glyphId <= 0) break;
+                    sqlite3_reset(componentStatement.get());
+                    sqlite3_clear_bindings(componentStatement.get());
+                    sqlite3_bind_text(componentStatement.get(), 1, posting.first.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int64(componentStatement.get(), 2, glyphId);
+                    sqlite3_bind_int(componentStatement.get(), 3, 1 << source);
+                    ok = sqlite3_step(componentStatement.get()) == SQLITE_DONE;
+                    if(!ok) break;
+                }
+            }
+        }
     }
 
     if(ok)
         ok = SQLiteExecute(database, "COMMIT;");
     else
         SQLiteExecute(database, "ROLLBACK;");
+    if(ok) SQLiteExecute(database, "VACUUM;");
     sqlite3_close(database);
     if(ok) {
         _pendingStrokeCountCache.clear();

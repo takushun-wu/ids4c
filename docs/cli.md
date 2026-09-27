@@ -43,12 +43,15 @@ GLYPH can be an actual character, U+XXXX, 0xXXXX, or an abstract glyph name.
 | --unification-level | none, srcseparation, lv1, lv2 | IWDS fuzzy-unification level |
 | --default-region | Region string | Fallback region or suffix when an exact component glyph is unavailable |
 | --locale-suffix-order | `>` and `=` separated suffix list | Set locale-suffix fallback order; `.` means no suffix |
-| --result-filter | all, ignore-lc-suffix, ignore-other-locales | Result suffix and locale filtering |
+| --result-filter | all, ignore-lc-suffix, ignore-other-locales-base-only, ignore-other-locales-keep-ivs | Result suffix and locale filtering |
+| --disable-same-ids-exclusion | No value | Allow same-IDS glyphs distinguished by `{glyph}` to match each other |
 | --glyph-domain | all, unicode, private, abstract | Glyph-domain filter |
 | --unicode-block | Comma-separated | Unicode-block filter |
 | --ignore-overlay | No value | Ignore results whose matching path uses ⿻ |
 
 --unicode-block accepts all, cjk, basic, ext-a through ext-j, compatibility, radicals, strokes, private-bmp, private-plane15, private-plane16, abstract, and other.
+
+`ignore-other-locales-base-only` treats all IVS variants of a base code point as one result. `ignore-other-locales-keep-ivs` treats each base-code-point/variation-selector pair (including no selector) as a separate result. Strict locale filtering chooses among glyphs that actually matched the query; `--locale-suffix-order` does not make an unmatched base glyph eligible. The former `ignore-other-locales` value is no longer accepted.
 
 ## Output formats
 
@@ -112,11 +115,11 @@ Replace existing private IDS entries:
   --format default
 ```
 
-Import failures report the source line, IDS index, character position, and other diagnostics when available.
+IDS imports print their current stage to stderr (reading, HV cache, stroke-neutral cache, component index, stroke counts, saving, and completion). Import failures report the source line, IDS index, character position, and other diagnostics when available.
 
 ### Caches after import
 
-A successful IDS import builds the HV query cache and the stroke-neutral composition cache from the raw expressions. Raw IDS and derived caches are stored in the same SQLite database; the caches should not be edited manually. Adding or reimporting private data incrementally updates the affected glyphs.
+A successful IDS import builds the HV query cache, stroke-neutral composition cache, and first-level component index from the raw expressions. Raw IDS and derived data are stored in the same SQLite database; the caches and index should not be edited manually. Adding or reimporting private data updates the affected glyphs and index. Missing or older component indexes are rebuilt or migrated when the database is loaded.
 
 If a database was generated from a new `ids_lv0.txt`, or if its derived data no longer matches the source file, reimport the database. The C++ API also provides `RebuildQueryCache()` to rebuild derived data from the raw IDS currently loaded in the database. The import report contains accepted expressions, cache entries, cache truncations, and detailed issues.
 ## Query examples
@@ -144,7 +147,7 @@ Combined filters:
 ```powershell
 .\build\ids4c-cli.exe `
   --database yibai0 `
-  --result-filter ignore-other-locales `
+  --result-filter ignore-other-locales-keep-ivs `
   --glyph-domain unicode `
   --unicode-block "basic,ext-a" `
   --ignore-overlay `

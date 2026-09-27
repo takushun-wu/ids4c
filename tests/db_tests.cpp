@@ -113,6 +113,39 @@ int main() {
     std::remove("db/cross-ids.dat");
     std::remove("db/cross-ids.sqlite");
 
+    std::remove("db/repeated-strokes.sqlite");
+    {
+        IDSdatabase strokeSearchDatabase("repeated-strokes", IDSdbOpenMode::StartEmpty);
+        IDSImportReader reader = [](const IDSImportRecordCallback& emit, std::string&) {
+            const char* glyphs[] = {u8"𠙴", u8"\uE140", u8"\uE141", u8"\uE142"};
+            const char* expressions[] = {u8"#(丨-𠃋)", u8"#(-𠃋𠃋𠃋𠃋)", u8"⿰𠃋𠃋", u8"𠃋"};
+            for(size_t index = 0; index < 4; index++) {
+                IDSImportRecord record;
+                record.line = index + 1;
+                record.idsIndex = 1;
+                record.glyphs = {glyphs[index]};
+                record.expression = expressions[index];
+                record.ids = record.expression;
+                if(!emit(record)) return false;
+            }
+            return true;
+        };
+        if(strokeSearchDatabase.ImportDB(reader) != 0)
+            return Fail("The repeated-stroke fixture could not be imported.");
+        if(!ExpectMatch(strokeSearchDatabase, u8"<search=㇜>", u8"𠙴") ||
+            ExpectMatch(strokeSearchDatabase, u8"<search=㇜,㇜>", u8"𠙴") ||
+            ExpectMatch(strokeSearchDatabase, u8"<search=㇜,㇜,㇜,㇜>", u8"𠙴"))
+            return Fail("Repeated CJK stroke terms reused one negative stroke token.");
+        if(!ExpectMatch(strokeSearchDatabase, u8"<search=㇜,㇜,㇜,㇜>", u8"\uE140") ||
+            !ExpectMatch(strokeSearchDatabase, u8"<search=㇜,㇜>", u8"\uE141") ||
+            ExpectMatch(strokeSearchDatabase, u8"<search=㇜,㇜,㇜>", u8"\uE141"))
+            return Fail("Repeated stroke terms did not consume distinct tokens or components.");
+        if(!ExpectMatch(strokeSearchDatabase, u8"<search=𠃋>", u8"\uE142") ||
+            ExpectMatch(strokeSearchDatabase, u8"<search=𠃋,𠃋>", u8"\uE142"))
+            return Fail("One ordinary glyph node satisfied repeated search terms.");
+    }
+    std::remove("db/repeated-strokes.sqlite");
+
     // A repeated variable may bind a contiguous HV expansion and later match
     // an ideograph that expands to the same directional sequence.
     std::remove("db/variable-hv.sqlite");
@@ -251,7 +284,7 @@ int main() {
         if(firstLocaleQuery == nullptr || secondLocaleQuery == nullptr)
             return Fail("The locale suffix fallback queries did not parse.");
         IDSqueryOptions localeOptions;
-        localeOptions.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES;
+        localeOptions.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY;
         if(!ParseLocaleSuffixFallbackOrder("C>G>.>H>T", localeOptions.filter.localeSuffixFallbackOrder))
             return Fail("The locale suffix fallback test order did not parse.");
         const IDSOwnerList defaultIDS = localeDatabase.GetIDSOwned(Ideograph(u8"丁"));
@@ -271,12 +304,53 @@ int main() {
         const std::vector<Ideograph> secondLocaleMatches =
             localeDatabase.MatchQuery(secondLocaleQuery.get(), localeOptions);
         if(firstLocaleMatches.size() != 1 || !HasIdeograph(firstLocaleMatches, u8"甲C") ||
-            secondLocaleMatches.size() != 1 || !HasIdeograph(secondLocaleMatches, u8"乙T"))
-            return Fail("The configured locale suffix fallback order was not applied.");
+            !secondLocaleMatches.empty())
+            return Fail("Strict locale fallback filtering did not require a matched base glyph.");
         std::remove("db/locale-order.dat");
         std::remove("db/locale-order.sqlite");
-        std::remove("db/yibai-compat.sqlite");
     }
+    std::remove("db/locale-ivs.sqlite");
+    {
+        IDSdatabase localeIVSDatabase("locale-ivs");
+        IDSImportReader reader = [](const IDSImportRecordCallback& emit, std::string&) {
+            auto add = [&emit](const char* glyph) {
+                IDSImportRecord record;
+                record.line       = 1;
+                record.idsIndex   = 1;
+                record.glyphs     = {glyph};
+                record.expression = "#(H)";
+                record.ids        = record.expression;
+                return emit(record);
+            };
+            return add(u8"一") && add(u8"一B") &&
+                add(u8"一︀") && add(u8"一︀B") && add(u8"二︀C");
+        };
+
+        if(localeIVSDatabase.ImportDB(reader) != 0)
+            return Fail("The locale IVS fixture could not be imported.");
+
+        IDSOwner query = ParseIDSOwned("#(H)");
+        if(query == nullptr) return Fail("The locale IVS query did not parse.");
+
+        IDSqueryOptions baseOnlyOptions;
+        baseOnlyOptions.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY;
+        const std::vector<Ideograph> baseOnlyMatches = localeIVSDatabase.MatchQuery(query.get(), baseOnlyOptions);
+        if(baseOnlyMatches.size() != 1 || !HasIdeograph(baseOnlyMatches, u8"一") ||
+            HasIdeograph(baseOnlyMatches, u8"一︀"))
+            return Fail("The base-only locale filter did not collapse IVS variants.");
+
+        IDSqueryOptions keepIVSOptions;
+        keepIVSOptions.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES_KEEP_IVS;
+        const std::vector<Ideograph> keepIVSMatches =
+            localeIVSDatabase.MatchQuery(query.get(), keepIVSOptions);
+        if(keepIVSMatches.size() != 3 || !HasIdeograph(keepIVSMatches, u8"一") ||
+            !HasIdeograph(keepIVSMatches, u8"一︀") || !HasIdeograph(keepIVSMatches, u8"二︀C") ||
+            HasIdeograph(keepIVSMatches, u8"一B") ||
+            HasIdeograph(keepIVSMatches, u8"一︀B"))
+            return Fail("The IVS-preserving locale filter did not keep independent base+IVS results.");
+    }
+    std::remove("db/locale-ivs.sqlite");
+    std::remove("db/yibai-compat.sqlite");
     {
         std::ofstream source("db/yibai-compat.dat");
         source << u8"\u8863\t\u2FF1\u4EA0.\U00027607.(.)\n";
@@ -311,6 +385,9 @@ int main() {
         source << u8"吉\t⿱士口\n";
         source << u8"干\t⿱一十\n";
         source << u8"王\t⿱一土\t⿱干一\n";
+        source << u8"日\t⿴囗一\n";
+        source << u8"曰\t{曰}⿴囗一\n";
+        source << u8"欥\t⿰曰欠\n";
         source << u8"丙\t{?0}⿱一二\n";
         source << u8"丁\t⿱一二\n";
         source << u8"㞷\t⿱屮王\n";
@@ -348,6 +425,14 @@ int main() {
             return Fail("The HV origin fixture did not produce the alternate flattened path.");
         if(!ExpectMatch(hvOriginDatabase, u8"<search=土>", u8"㞷"))
             return Fail("The original ambiguous same-IDS source no longer matched its HV expansion.");
+        if(ExpectMatch(hvOriginDatabase, u8"<search=日,欠>", u8"欥"))
+            return Fail("HV recursion ignored the unique source of 曰.");
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=曰,欠>", u8"欥"))
+            return Fail("HV recursion rejected the actual unique source 曰.");
+        hvOriginDatabase.config.fuzzyMatch.excludeNonEquivalentSameIDS = false;
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=日,欠>", u8"欥"))
+            return Fail("Disabling same-IDS exclusion did not restore the variant match.");
+        hvOriginDatabase.config.fuzzyMatch.excludeNonEquivalentSameIDS = true;
     }
     std::remove("db/hv-origin.dat");
     {
@@ -373,9 +458,18 @@ int main() {
     std::remove("db/replace-query.sqlite");
     {
         IDSdatabase importedDatabase("replace-query");
-        if(importedDatabase.ImportDB("db/replace-query.dat") != 0)
+        std::vector<IDSimportStage> stages;
+        if(importedDatabase.ImportDB("db/replace-query.dat", IDSDB_DEFAULT,
+                [&](IDSimportStage stage) { stages.push_back(stage); }) != 0)
             return Fail("The SQLite test database could not be imported.");
+        if(stages != std::vector<IDSimportStage>({IDSimportStage::Reading, IDSimportStage::HVCache,
+                IDSimportStage::StrokeNeutralCache, IDSimportStage::ComponentIndex,
+                IDSimportStage::StrokeCache, IDSimportStage::Saving, IDSimportStage::Complete}))
+            return Fail("The database import did not report its stages in order.");
     }
+    IDSdatabase emptyImportTarget("replace-query", IDSdbOpenMode::StartEmpty);
+    if(!emptyImportTarget.isEmpty())
+        return Fail("A full-import target unexpectedly loaded the database it will replace.");
     IDSdatabase database("replace-query");
     if(database.isEmpty()) return Fail("The SQLite test database did not reload.");
 
@@ -397,9 +491,91 @@ int main() {
         sameExpressionDatabase, "SELECT COUNT(*) FROM ids_same_expression WHERE ids_text = ?", u8"⿱一一");
     const int uniqueExpressionRowCount = QueryParameterizedCount(
         sameExpressionDatabase, "SELECT COUNT(*) FROM ids_same_expression WHERE ids_text = ?", "#(S)");
+    const int combinedComponentCount = QueryParameterizedCount(sameExpressionDatabase,
+        "SELECT COUNT(*) FROM query_component_postings AS p JOIN glyphs AS g ON g.id = p.glyph_id "
+        "WHERE (p.source_mask & 3) = 3 AND p.component_key = ? AND g.glyph_key = '相'", u8"木");
+    const int strokeComponentCount = QueryParameterizedCount(sameExpressionDatabase,
+        "SELECT COUNT(*) FROM query_component_postings AS p JOIN glyphs AS g ON g.id = p.glyph_id "
+        "WHERE (p.source_mask & 1) != 0 AND p.component_key = ? AND g.glyph_key = '㔾'", u8"乙");
+    const int compactIndexVersion = QueryParameterizedCount(sameExpressionDatabase,
+        "SELECT COUNT(*) FROM metadata WHERE key = 'component_index_version' AND value = '2'", nullptr);
     sqlite3_close(sameExpressionDatabase);
     if(sameExpressionRowCount < 3 || repeatedExpressionRowCount < 3 || uniqueExpressionRowCount != 0)
         return Fail("The strict IDS hash table did not store only repeated raw expressions.");
+    if(combinedComponentCount != 1 || strokeComponentCount != 1 || compactIndexVersion != 1)
+        return Fail("The compact component index did not merge raw, HV, and stroke postings.");
+
+    sqlite3* legacyIndexDatabase = nullptr;
+    if(sqlite3_open_v2("db/replace-query.sqlite", &legacyIndexDatabase, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK)
+        return Fail("The SQLite fixture could not be opened for legacy-index conversion.");
+    const int legacyConversion = sqlite3_exec(legacyIndexDatabase,
+        "BEGIN;"
+        "CREATE TABLE legacy_postings(source_kind INTEGER NOT NULL, component_key TEXT NOT NULL, "
+        "glyph_id INTEGER NOT NULL, PRIMARY KEY(source_kind, component_key, glyph_id));"
+        "INSERT INTO legacy_postings SELECT 0, component_key, glyph_id FROM query_component_postings "
+        "WHERE (source_mask & 1) != 0;"
+        "INSERT INTO legacy_postings SELECT 1, component_key, glyph_id FROM query_component_postings "
+        "WHERE (source_mask & 2) != 0;"
+        "INSERT INTO legacy_postings SELECT 2, component_key, glyph_id FROM query_component_postings "
+        "WHERE (source_mask & 4) != 0;"
+        "DROP TABLE query_component_postings;"
+        "ALTER TABLE legacy_postings RENAME TO query_component_postings;"
+        "UPDATE metadata SET value = '1' WHERE key = 'component_index_version';"
+        "COMMIT;", nullptr, nullptr, nullptr);
+    sqlite3_close(legacyIndexDatabase);
+    if(legacyConversion != SQLITE_OK) return Fail("The test could not construct a legacy component index.");
+
+    IDSdatabase upgradedDatabase("replace-query");
+    if(upgradedDatabase.isEmpty() || !ExpectMatch(upgradedDatabase, u8"<search=木>", u8"相"))
+        return Fail("Legacy component-index migration changed query results.");
+    sqlite3* upgradedIndexDatabase = nullptr;
+    if(sqlite3_open_v2("db/replace-query.sqlite", &upgradedIndexDatabase, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+        return Fail("The migrated component-index database could not be opened.");
+    const int upgradedVersion = QueryParameterizedCount(upgradedIndexDatabase,
+        "SELECT COUNT(*) FROM metadata WHERE key = 'component_index_version' AND value = '2'", nullptr);
+    const int upgradedComponentCount = QueryParameterizedCount(upgradedIndexDatabase,
+        "SELECT COUNT(*) FROM query_component_postings AS p JOIN glyphs AS g ON g.id = p.glyph_id "
+        "WHERE (p.source_mask & 3) = 3 AND p.component_key = ? AND g.glyph_key = '相'", u8"木");
+    sqlite3_close(upgradedIndexDatabase);
+    if(upgradedVersion != 1 || upgradedComponentCount != 1)
+        return Fail("The legacy component index was not migrated to compact v2 storage.");
+
+    sqlite3* missingIndexDatabase = nullptr;
+    if(sqlite3_open_v2("db/replace-query.sqlite", &missingIndexDatabase, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK)
+        return Fail("The SQLite fixture could not be opened for missing-index conversion.");
+    const int missingIndexConversion = sqlite3_exec(missingIndexDatabase,
+        "BEGIN; DROP TABLE query_component_postings; "
+        "DELETE FROM metadata WHERE key = 'component_index_version'; COMMIT;", nullptr, nullptr, nullptr);
+    sqlite3_close(missingIndexDatabase);
+    if(missingIndexConversion != SQLITE_OK) return Fail("The test could not remove the derived index.");
+    IDSdatabase rebuiltIndexDatabase("replace-query");
+    if(rebuiltIndexDatabase.isEmpty() || !ExpectMatch(rebuiltIndexDatabase, u8"<search=木>", u8"相"))
+        return Fail("A missing component index could not be rebuilt from IDS data.");
+    sqlite3* rebuiltIndexFile = nullptr;
+    if(sqlite3_open_v2("db/replace-query.sqlite", &rebuiltIndexFile, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+        return Fail("The rebuilt component-index database could not be opened.");
+    const int rebuiltVersion = QueryParameterizedCount(rebuiltIndexFile,
+        "SELECT COUNT(*) FROM metadata WHERE key = 'component_index_version' AND value = '2'", nullptr);
+    sqlite3_close(rebuiltIndexFile);
+    if(rebuiltVersion != 1) return Fail("A missing component index was not persisted independently.");
+
+    sqlite3* futureIndexDatabase = nullptr;
+    if(sqlite3_open_v2("db/replace-query.sqlite", &futureIndexDatabase, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK)
+        return Fail("The SQLite fixture could not be opened for future-version verification.");
+    const int futureVersionUpdate = sqlite3_exec(futureIndexDatabase,
+        "UPDATE metadata SET value = '999' WHERE key = 'component_index_version';", nullptr, nullptr, nullptr);
+    sqlite3_close(futureIndexDatabase);
+    if(futureVersionUpdate != SQLITE_OK) return Fail("The test could not set a future index version.");
+    IDSdatabase futureIndexReader("replace-query");
+    if(futureIndexReader.isEmpty() || !ExpectMatch(futureIndexReader, u8"<search=木>", u8"相"))
+        return Fail("A future component-index version prevented in-memory fallback.");
+    sqlite3* futureIndexFile = nullptr;
+    if(sqlite3_open_v2("db/replace-query.sqlite", &futureIndexFile, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+        return Fail("The future-version component-index database could not be reopened.");
+    const int preservedFutureVersion = QueryParameterizedCount(futureIndexFile,
+        "SELECT COUNT(*) FROM metadata WHERE key = 'component_index_version' AND value = '999'", nullptr);
+    sqlite3_close(futureIndexFile);
+    if(preservedFutureVersion != 1) return Fail("A future component-index version was overwritten.");
 
     const std::vector<Ideograph> repeatedExpressionMatches = database.MatchQuery(ParseIDSOwned(u8"⿱一一").get());
     if(!HasIdeograph(repeatedExpressionMatches, u8"二") || !HasIdeograph(repeatedExpressionMatches, u8"亍") ||
@@ -516,8 +692,15 @@ int main() {
         !database.GetRawIDSOwned(invalidPrivateGlyph).empty())
         return Fail("An invalid private IDS import changed the database.");
 
-    if(database.ImportPrivateDB("db/private-extension.dat") != 0)
+    std::vector<IDSimportStage> privateImportStages;
+    if(database.ImportPrivateDB("db/private-extension.dat", IDSDB_DEFAULT,
+            [&](IDSimportStage stage) { privateImportStages.push_back(stage); }) != 0)
         return Fail("A valid private IDS library could not be imported.");
+    const std::vector<IDSimportStage> expectedImportStages = {IDSimportStage::Reading, IDSimportStage::HVCache,
+        IDSimportStage::StrokeNeutralCache, IDSimportStage::ComponentIndex, IDSimportStage::StrokeCache,
+        IDSimportStage::Saving, IDSimportStage::Complete};
+    if(privateImportStages != expectedImportStages)
+        return Fail("Private IDS import did not report its stages in order.");
     if(database.GetLastImportReport().rebuiltCacheGlyphs != 2)
         return Fail("Private IDS import rebuilt an unexpected number of HV cache entries.");
     const IDSOwnerList privateRaw = database.GetRawIDSOwned(privateGlyph);
@@ -530,13 +713,30 @@ int main() {
     if(!ExpectMatch(database, u8"\u2FF3\u4E00\u4E59\u7532", u8"\u3412"))
         return Fail("A base glyph did not use its private component's rebuilt HV cache.");
 
-    if(database.ReimportPrivateDB("db/private-extension-reimport.dat") != 0)
+    std::vector<IDSimportStage> privateReimportStages;
+    if(database.ReimportPrivateDB("db/private-extension-reimport.dat", IDSDB_DEFAULT,
+            [&](IDSimportStage stage) { privateReimportStages.push_back(stage); }) != 0)
         return Fail("The private IDS library could not be reimported.");
+    if(privateReimportStages != expectedImportStages)
+        return Fail("Private IDS reimport did not report its stages in order.");
     const IDSOwnerList revertedCache = database.GetIDSOwned(affectedBaseGlyph);
     if(!database.GetRawIDSOwned(privateGlyph).empty() ||
         database.GetRawIDSOwned(reimportedPrivateGlyph).size() != 1 ||
         revertedCache.size() != 1 || revertedCache.front()->toString() != u8"\u25A4(\uE000|\u7532)")
         return Fail("Reimporting a private IDS library did not replace old private entries and caches.");
+
+    sqlite3* privateIndexDatabase = nullptr;
+    if(sqlite3_open_v2("db/replace-query.sqlite", &privateIndexDatabase, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+        return Fail("The reimported private database could not be opened for index verification.");
+    const int replacementPostingCount = QueryParameterizedCount(privateIndexDatabase,
+        "SELECT COUNT(*) FROM query_component_postings AS p JOIN glyphs AS g ON g.id = p.glyph_id "
+        "WHERE (p.source_mask & 1) != 0 AND p.component_key = '乙' AND g.glyph_key = ?", u8"\uE001");
+    const int removedPostingCount = QueryParameterizedCount(privateIndexDatabase,
+        "SELECT COUNT(*) FROM query_component_postings AS p JOIN glyphs AS g ON g.id = p.glyph_id "
+        "WHERE (p.source_mask & 1) != 0 AND g.glyph_key = ?", u8"\uE000");
+    sqlite3_close(privateIndexDatabase);
+    if(replacementPostingCount != 1 || removedPostingCount != 0)
+        return Fail("Private reimport did not replace the direct component postings.");
 
     IDSdatabase reloadedPrivateDatabase("replace-query");
     if(reloadedPrivateDatabase.isEmpty() || !reloadedPrivateDatabase.GetRawIDSOwned(privateGlyph).empty() ||
@@ -686,14 +886,14 @@ int main() {
         return Fail("Lowercase suffix filtering did not run in the database matcher.");
 
     IDSqueryOptions ignoreOtherLocales;
-    ignoreOtherLocales.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES;
+    ignoreOtherLocales.filter.resultFilter = IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY;
     if(!ExpectMatchWithOptions(database, middleSearch, ignoreOtherLocales, u8"\u3400") ||
         ExpectMatchWithOptions(database, middleSearch, ignoreOtherLocales, u8"\u3400a") ||
         ExpectMatchWithOptions(database, middleSearch, ignoreOtherLocales, u8"\u3400B") ||
         ExpectMatchWithOptions(database, middleSearch, ignoreOtherLocales, u8"\u3400C") ||
-        !ExpectMatchWithOptions(database, middleSearch, ignoreOtherLocales, u8"\u3401B") ||
+        ExpectMatchWithOptions(database, middleSearch, ignoreOtherLocales, u8"\u3401B") ||
         ExpectMatchWithOptions(database, middleSearch, ignoreOtherLocales, u8"\u3401C"))
-        return Fail("Locale filtering did not use the cached base-glyph table.");
+        return Fail("Strict locale filtering kept a variant without a matched base glyph.");
     if(!ExpectMatch(database, "⿰礻⬚", "祺"))
         return Fail("An enclosing radical did not expand for an open horizontal query.");
     if(ExpectMatch(database, "⿰⬚目", "祺"))
@@ -918,6 +1118,10 @@ int main() {
         return Fail("A nested any expression did not match the second component alternative.");
     if(ExpectMatch(database, u8"<search=<any=\u7532,\u4E8C>>", u8"\u3007"))
         return Fail("A nested any expression matched a non-member character.");
+    if(!ExpectMatch(database, u8"<search=<any=\u7532,\u2FF1\u4E00\u4E00>>", u8"\u7531") ||
+        !ExpectMatch(database, u8"<search=<any=\u7532,\u2FF1\u4E00\u4E00>>", u8"\u4E8C") ||
+        ExpectMatch(database, u8"<search=<any=\u7532,\u2FF1\u4E00\u4E00>>", u8"\u3007"))
+        return Fail("A mixed glyph/IDS any search lost a branch or accepted an unrelated glyph.");
     if(!ExpectMatch(database, u8"<any=\u2FF1\u4E00\u4E00,\u2FF0\u7532\u4E00>", u8"\u4E8C"))
         return Fail("An any expression did not accept an IDS term.");
     if(!ExpectMatch(database, u8"⿱<search=一>一", u8"二"))
@@ -1184,6 +1388,7 @@ int main() {
             return add(u8"\uE130", u8"\u2FF0\u2E84\u4E00") &&
                 add(u8"\uE131", u8"\u2FF0\u31C8n\u4E00") &&
                 add(u8"\uE132", u8"\u2FF0\u4E59\u4E00") &&
+                add(u8"\U00020628", u8"#(-丿⺄)") &&
                 add(u8"\u2E84", "#(HNg)") &&
                 add(u8"\u31C8n", "#(HNg)");
         };
@@ -1194,7 +1399,10 @@ int main() {
             !ExpectMatch(cjkSymbolDatabase, u8"<search=\u31E4>", u8"\uE130") ||
             !ExpectMatch(cjkSymbolDatabase, u8"<search=\u2E84>", u8"\uE130") ||
             !ExpectMatch(cjkSymbolDatabase, u8"<search=\u2E84>", u8"\uE131") ||
-            !ExpectMatch(cjkSymbolDatabase, u8"<search=\u31E0>", u8"\uE132"))
+            !ExpectMatch(cjkSymbolDatabase, u8"<search=\u31E0>", u8"\uE132") ||
+            !ExpectMatch(cjkSymbolDatabase, u8"<search=\u2E84>", u8"\U00020628") ||
+            !ExpectMatch(cjkSymbolDatabase, u8"<search=\u31E4>", u8"\U00020628") ||
+            !ExpectMatch(cjkSymbolDatabase, u8"<search=丿>", u8"\U00020628"))
             return Fail("U+31E4 did not match its CJK radical fallback U+2E84.");
     }
     std::remove("db/cjk-symbol-fallback.sqlite");

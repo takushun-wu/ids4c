@@ -36,6 +36,7 @@ This searches for a structure whose left component is 贝 and whose right compon
 ```
 
 Matches from different IDS expressions are not combined into one result. A search expression can contain IDS structures and nested `<any=...>` expressions.
+Repeated terms require separate matches within that IDS expression: one stroke token in `#(...)` cannot satisfy the same requested stroke multiple times. A single-stroke term can match a stroke token in `#(...)`, including a negative token (the minus sign marks the token; it is not part of the stroke glyph).
 
 If a term itself contains a comma, quote it with single or double quotes:
 
@@ -122,6 +123,7 @@ The optional brackets on `▥` and `▤` record an ambiguity source produced by 
 `士=0:2` means that the half-open child range `[0, 2)` in the derived structure originated from the glyph 士. Multiple origins are comma-separated, for example `[士=0:2,土=1:3]`. The `glyph` field is recorded only for source glyphs that require the explicit uniqueness distinction described in section 7.1 of IDS.pdf; callers should not add this annotation to an unambiguous structure.
 
 This annotation mainly appears in the HV cache, detailed match results, or equivalent queries. The parser preserves it, and the matcher uses it to avoid treating 土 and an explicitly distinguished 士 as the same component. It is different from the combination-structure arguments in `▥(...)` / `▤(...)`; the ordinary `|` split marker in an arrangement must not be treated as a component.
+The same-IDS uniqueness exclusion is enabled by default, including during recursive HV matching. The CLI option `--disable-same-ids-exclusion` and Python configuration `fuzzy_match.exclude_non_equivalent_same_ids = False` disable it.
 
 ## Raw IDS and derived caches
 
@@ -130,6 +132,7 @@ Database import preserves the raw IDS and builds derived query caches:
 - raw IDS are the traceable definitions from sources such as `ids_lv0.txt`;
 - the HVExtract cache stores multiple structural alternatives when one raw IDS expands in more than one way;
 - the stroke-neutral composition cache ignores lowercase stroke suffix differences only during composition lookup, for example allowing `一t` to act as a composable component without changing the raw definition;
+- a first-level component index records direct components from raw IDS, HV, and stroke-neutral expressions in SQLite. It is a conservative candidate filter for suitable `<search=...>` queries, not a replacement for full matching; missing or older indexes are rebuilt or migrated on load;
 - private-data reimports and cache rebuilds regenerate derived caches from the raw IDS.
 
 Consequently, `raw_ids` and `matched_ids` in a detailed result may differ. Use `match_source` and `preprocess_rules` to identify the cache source and preprocessing rules used.

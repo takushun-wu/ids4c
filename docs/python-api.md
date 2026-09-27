@@ -155,7 +155,7 @@ match() returns only the matching glyph strings.
 options = ids4c.QueryOptions()
 options.track_match_paths = True
 options.filter.ignore_overlay_structure = True
-options.filter.result_filter = ids4c.ResultFilter.IGNORE_OTHER_LOCALES
+options.filter.result_filter = ids4c.ResultFilter.IGNORE_OTHER_LOCALES_KEEP_IVS
 options.filter.glyph_domain = ids4c.GlyphDomain.UNICODE
 options.filter.unicode_blocks = [ids4c.UnicodeBlock.CJK_BASIC]
 
@@ -170,12 +170,13 @@ QueryOptions:
 FilterOptions:
 
 - ignore_overlay_structure: ignore results whose matching path uses ⿻;
-- result_filter: ALL, IGNORE_LC_SUFFIX, or IGNORE_OTHER_LOCALES;
+- result_filter: ALL, IGNORE_LC_SUFFIX, IGNORE_OTHER_LOCALES_BASE_ONLY, or IGNORE_OTHER_LOCALES_KEEP_IVS;
 - glyph_domain: ALL, UNICODE, PRIVATE, or ABSTRACT;
 - unicode_blocks: one or more UnicodeBlock values;
 - custom_ranges: names of registered custom ranges.
 
 The current Python binding can select ranges registered by the host application, but does not yet expose range registration.
+`IGNORE_OTHER_LOCALES_BASE_ONLY` collapses IVS variants of a base code point. `IGNORE_OTHER_LOCALES_KEEP_IVS` keeps each base/variation-selector pair, including the no-selector form, independent. Strict locale filtering selects only among results that matched the query. `options.filter.locale_suffix_fallback_order` can specify the suffix priority; the old `IGNORE_OTHER_LOCALES` enum value is unavailable.
 Available enums include ResultFilter, GlyphDomain, UnicodeBlock, IWDSUnificationLevel, and DatabaseFormat.
 
 ## Detailed results
@@ -245,6 +246,7 @@ config.fuzzy_match.unification_level = (
 )
 config.fuzzy_match.default_region = "G"
 config.fuzzy_match.stroke_neutral_composition = True
+config.fuzzy_match.exclude_non_equivalent_same_ids = True
 config.misc.enable_cache = True
 config.misc.sym_fallback = True
 config.misc.suffix_is_alt_form = False
@@ -253,6 +255,7 @@ database.config = config
 ```
 
 DatabaseConfig contains fuzzy_match and misc configuration groups. Changes affect subsequent operations on that Database object.
+`exclude_non_equivalent_same_ids` defaults to True: glyphs explicitly distinguished by `{glyph}` are not unified merely because they share an IDS expression. Set it to False to allow those same-IDS matches.
 
 ## Import data
 
@@ -277,7 +280,7 @@ Import failures raise RuntimeError. Read database.last_error and database.last_i
 
 `last_import_report` is a dictionary containing fields such as `input_lines`, `data_lines`, `source_expressions`, `accepted_expressions`, `rejected_expressions`, `query_cache_entries`, `rebuilt_cache_glyphs`, `cache_truncations`, and `issues`. Each item in `issues` includes `line`, `ids_index`, `character_index`, `glyph`, `expression`, and `message`, which can be used to display the exact import location.
 
-After import, the database builds the HV cache and stroke-neutral composition cache from the raw IDS. `raw_ids()` returns original definitions, while `ids()` returns query-cache entries. To regenerate derived data from the raw definitions, reimport the database or use the C++ API `RebuildQueryCache()`.
+After import, the database builds the HV cache, stroke-neutral composition cache, and first-level component index from the raw IDS. `raw_ids()` returns original definitions, while `ids()` returns query-cache entries. A missing or older index is rebuilt or migrated when loading the database. To regenerate derived data from the raw definitions, reimport the database or use the C++ API `RebuildQueryCache()`. The C++ import API supports stage callbacks; they are not exposed by this Python binding.
 ## Ownership and threading
 
 - IDSNode objects and database-returned objects own their data;
