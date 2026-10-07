@@ -3,6 +3,7 @@
 
 #include "ids4c/ids4c.h"
 #include "ids4c/idsdb.h"
+#include "ids4c/version.h"
 
 #include <limits>
 #include <memory>
@@ -40,6 +41,7 @@ public:
     std::string text() const { return node_->toString(); }
 
     std::string unique_separator() const { return node_->GetUniqueSeparator(); }
+    bool is_alternative_definition() const { return node_->IsAlternativeDefinition(); }
 
     std::string kind() const {
         switch(node_->GetType()) {
@@ -193,7 +195,7 @@ public:
         int overlayRange[2] = {0, 0};
         pattern->GetOverlayRange(overlayRange);
         IDSOwner result(new Pattern(pattern->GetIDC(), rawChildren, pattern->GetPreferSplitPoint(), overlayRange,
-            pattern->GetOverlayType(), pattern->GetOptionalInt()));
+            pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
         return IDSNodeHandle(std::move(result));
     }
 
@@ -356,6 +358,9 @@ static std::vector<MatchDetailInfo> MatchDetails(DatabaseHandle& database, const
 
 PYBIND11_MODULE(ids4c, module) {
     module.doc() = "Basic Python bindings for ids4c IDS trees and database queries.";
+    module.attr("__version__") = IDS4C_VERSION_STRING;
+    module.attr("__copyright__") = IDS4C_COPYRIGHT;
+    module.attr("__license__") = IDS4C_LICENSE;
     module.attr("IDSDB_DEFAULT") = py::int_(static_cast<int>(IDSDB_DEFAULT));
     module.attr("IDSDB_YIBAI") = py::int_(static_cast<int>(IDSDB_YIBAI));
 
@@ -404,6 +409,10 @@ PYBIND11_MODULE(ids4c, module) {
         .value("LV1", IWDS_UNIFICATION_LV1)
         .value("LV2", IWDS_UNIFICATION_LV2);
 
+    py::enum_<IDSOverlapMatchMode>(module, "OverlapMatchMode")
+        .value("IGNORE", IDS_OVERLAP_MATCH_IGNORE)
+        .value("CONSTRAINED", IDS_OVERLAP_MATCH_CONSTRAINED);
+
     py::class_<IDSFilterOptions>(module, "FilterOptions")
         .def(py::init<>())
         .def_readwrite("ignore_overlay_structure", &IDSFilterOptions::ignoreOverlayStructure)
@@ -416,6 +425,8 @@ PYBIND11_MODULE(ids4c, module) {
     py::class_<IDSqueryOptions>(module, "QueryOptions")
         .def(py::init<>())
         .def_readwrite("filter", &IDSqueryOptions::filter)
+        .def_readwrite("overlap_match_mode", &IDSqueryOptions::overlapMatchMode)
+        .def_readwrite("strict_enclosure_match", &IDSqueryOptions::strictEnclosureMatch)
         .def_readwrite("track_match_paths", &IDSqueryOptions::trackMatchPaths);
 
     py::class_<IDSFuzzyMatchOptions>(module, "FuzzyMatchOptions")
@@ -440,6 +451,7 @@ PYBIND11_MODULE(ids4c, module) {
     py::class_<IDSNodeHandle>(module, "IDSNode")
         .def_property_readonly("kind", &IDSNodeHandle::kind)
         .def_property_readonly("unique_separator", &IDSNodeHandle::unique_separator)
+        .def_property_readonly("is_alternative_definition", &IDSNodeHandle::is_alternative_definition)
         .def_property_readonly("text", &IDSNodeHandle::text)
         .def_property_readonly("idc", &IDSNodeHandle::idc)
         .def_property_readonly("idc_type", &IDSNodeHandle::idc_type)

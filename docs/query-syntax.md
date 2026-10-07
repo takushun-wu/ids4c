@@ -110,6 +110,8 @@ At one level, a `<search>` or `<any>` expression may contain at most one `<excep
 
 A variable with the same name must correspond to the same IDS unit within one candidate match. Variables generated while importing IWDS use a separate namespace, commonly written as `<var=_a>`.
 
+In HV matching, one variable may bind a contiguous range of nodes rather than just one child. Repeated occurrences compare the bound component, not its textual spelling alone. For example, `⿱<var=1>⿰<var=1><var=1>` can match the three 秦 components of `䆐` even when one 秦 is expanded into `[𡗗, 丿, 木d]`. The lowercase `d` is a suffix on 木, not a separate node. Different variable names need not bind different components.
+
 Full-width letters and digits are not automatically converted to variables during ordinary IDS import because they may be actual glyph components.
 
 ## HV origin-range annotations
@@ -168,12 +170,67 @@ This means: find 贝 in the IDS of 赢 and replace that component with 女. The 
 
 They are not structure-ignoring wildcards. Matching still checks component order, node ranges, and correspondence.
 
+## Overlap modifiers and positions
+
+`⿻[M1|M2]AB` preserves one or two ordered overlap matrices. A matrix is either a horizontal slice (`[:-2]`, `[1:]`) or comma-separated rows (`[x,_x]`); an unseparated cell sequence such as `[_x_]` is one row. Empty rows are preserved, for example `[,x]`. Literal row symbols are `.`, `_`, `x`, `a`, `b`, `c`, `d`, `l`, and `r`.
+
+The default overlap mode, `ignore`, matches the structure and components without restricting the modifier. In `constrained` mode, matrix count, order, type, slice endpoints (including whether they are omitted), and literal rows are checked. No modifier matches only a candidate with no modifier. Slice and crossing-matrix notation are not semantically normalized: `[_x_]` and `[:-2]` are not automatically equivalent.
+
+| Query modifier | Meaning in constrained mode |
+| --- | --- |
+| `[*:*]` | One slice matrix with any endpoints, including omitted endpoints |
+| `[?:x]` | Invalid: `?` is not a slice-endpoint wildcard |
+| `[?]` | Exactly one row, including an empty row |
+| `[x,?]` | Literal row `x`, followed by exactly one arbitrary row |
+| `[x,*]` | Literal row `x`, followed by one or more arbitrary rows |
+| `[**]` | Exactly one matrix of either type |
+| `[**\|**]` | Exactly two matrices of either type |
+| `[***]` | Any entire modifier, including no modifier |
+
+`?` and `*` must occupy a whole comma-separated row; they do not substitute characters inside `_x`. `***` must occupy the whole modifier and cannot be combined with `|`. These wildcards are query-only.
+
+Full and partial enclosure positions accept nonnegative numeric indexes or the query wildcard `[*]`, for example `⿵[*]门⬚`. The wildcard includes position 0. It does not remove structure or component constraints, nor does it permit every transformation of a positioned candidate.
+
+CLI: `--overlap-match-mode constrained`. Python: `options.overlap_match_mode = ids4c.OverlapMatchMode.CONSTRAINED`. This differs from `--ignore-overlay`, which excludes overlay matches rather than checking their modifiers.
+
+## Enclosure reassociation and approximation
+
+Exact external reassociation supports the following forms in both directions. A, B, and C denote components, not literal query variables:
+
+```text
+⿸⿱ABC = ⿱A⿸BC    ⿸⿰ABC = ⿰A⿸BC
+⿹⿱ABC = ⿱A⿹BC    ⿹⿰ABC = ⿰⿹ACB
+⿺⿱ABC = ⿱⿺ACB    ⿺⿰ABC = ⿰A⿺BC
+⿽⿱ABC = ⿱⿽ACB    ⿽⿰ABC = ⿰⿽ACB
+⿵⿱ABC = ⿱A⿵BC
+⿶⿱ABC = ⿱⿶ACB
+⿷⿰ABC = ⿰A⿷BC
+⿼⿰ABC = ⿰⿼ACB
+```
+
+Nested enclosures also support exact reassociation, such as `⿵⿵ABC = ⿵A⿵BC`. HV-normalized `▥` / `▤` forms are considered where applicable. Nonzero enclosure positions and HV origin boundaries restrict transformations.
+
+Approximate rules are enabled by default, independently of the IWDS level. They include nested-enclosure layouts such as `⿵A⿱BC ≈ ⿵A⿵BC` and these corner layouts:
+
+```text
+⿰A⿱BC ≈ ⿸⿰ABC ≈ ⿺⿰ACB
+⿰⿱ABC ≈ ⿹⿰ACB ≈ ⿽⿰BCA
+⿱A⿰BC ≈ ⿸⿱ABC ≈ ⿹⿱ACB
+⿱⿰ABC ≈ ⿺⿱ACB ≈ ⿽⿱BCA
+```
+
+These are matching approximations, not changes to the raw IDS or unrestricted structure unification. They may add results. Enable CLI `--strict-enclosure-match`, the GUI's **Strict enclosure matching**, or Python `options.strict_enclosure_match = True` to disable approximations while retaining exact reassociation. This does not disable IWDS or same-IDS equivalence.
+
 ## Other extensions
 
 The parser also recognizes:
 
-- ㇯: a structure that subtracts a specified component;
-- ⿻: overlay structure, filterable through query options or CLI --ignore-overlay;
+- ㇯: subtract a specified component; numeric disambiguation such as `㇯[1]王一` is supported, but `㇯[*]...` is not;
+- ⿻: overlay structure with modifiers and query controls described above;
 - ⿾ and ⿿: extended structure nodes matched according to their parameters.
 
 These forms belong primarily to the query layer. For interchange with other programs, store raw IDS expressions separately and keep specialized expressions as query input or preprocessing output.
+
+## YiBai import metadata
+
+In YiBai source files, comma-separated variant identifiers such as `(.,T)` assign the definition to separate glyph records; `.` denotes the unsuffixed glyph. Default and alternative definition groups are preserved through `ids_entries.is_alternative` in schema 8. The group flag is metadata, not a structural node or a query exclusion. Stroke expressions are validated on import; query-only wildcards are rejected. See [cli.md](cli.md#upgrading-to-040) for reimport requirements when upgrading an older YiBai database.

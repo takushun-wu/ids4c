@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <sqlite3.h>
+#include <string>
 #include <vector>
 
 #include "ids4c/ids4c.h"
@@ -42,6 +43,397 @@ namespace {
 } // namespace
 
 int main() {
+    for(const char* expression: {u8"#(H)", u8"#(ABC)", u8"#(HPHwg)", u8"#(-乀x1㇇)",
+            u8"#(-丨𠃍-一z)", u8"#(丨b一-丨)", u8"#(丨x4◞◟◜◝)"}) {
+        IDSOwner parsed = ParseIDSOwned(expression);
+        if(parsed == nullptr || parsed->toString() != expression)
+            return Fail("A valid stroke chain did not round-trip.");
+    }
+    for(const char* expression: {"#()", "#(Hx)", "#(Hx99)", "#(Hxx0S)", "#(HbbS)",
+            "#(HxbS)", "#(Hb)", "#(HzH)", "#(Hzz)", "#(-)", "#(H-)",
+            "#(Hwg)", "#(W)", "#(Qe)", "#(Hbx0S)", "#(H--S)", "#(H-x0S)"}) {
+        IDSParseError error;
+        if(ParseIDSOwned(expression, &error) != nullptr || error.message.empty())
+            return Fail("An invalid stroke chain was accepted without a diagnostic.");
+    }
+    for(const char* expression: {u8"⿻[:-2]丨日", u8"⿻[1:]丨日", u8"⿻[1:|b]一二",
+            u8"⿻[xl,.l|r.,rx]口口", u8"⿻[r,r,l,l]工一", u8"⿻[x|1:]一二",
+            u8"⿻[:|:2]一二", u8"⿻[0:1]一二", u8"⿻[*:*]丨日", u8"⿻[?]丨日",
+            u8"⿻[*]丨日", u8"⿻[**]丨日", u8"⿻[***]丨日", u8"⿻[x,?,*]甲乙",
+            u8"⿻[1:|**]甲乙", u8"⿻[**|*]甲乙", u8"⿻[,x]丨日", u8"⿻[?,x]丨日",
+            u8"⿴[*]甲乙", u8"⿵[*]甲乙", u8"⿸[*]甲乙", u8"㇯[1]品口"}) {
+        IDSOwner parsed = ParseIDSOwned(expression);
+        if(parsed == nullptr || parsed->toString() != expression)
+            return Fail("An ambiguous overlay or subtraction modifier did not round-trip.");
+    }
+    IDSOwner twoMatrices = ParseIDSOwned(u8"⿻[1:|b]一二");
+    if(twoMatrices == nullptr || twoMatrices->GetType() != IDS_PATTERN ||
+        static_cast<Pattern*>(twoMatrices.get())->GetOverlapMatrices().size() != 2 ||
+        static_cast<Pattern*>(twoMatrices.get())->GetOverlapMatrices()[0].type !=
+            OverlapMatrixType::HorizontalIndexing ||
+        static_cast<Pattern*>(twoMatrices.get())->GetOverlapMatrices()[1].type != OverlapMatrixType::Rows ||
+        static_cast<Pattern*>(twoMatrices.get())->GetOverlapMatrices()[1].rows != std::vector<std::string>{"b"})
+        return Fail("The overlap modifier did not retain two typed matrices.");
+    IDSOwner matrixRows = ParseIDSOwned(u8"⿻[xl,.l|r.,rx]口口");
+    if(matrixRows == nullptr || matrixRows->GetType() != IDS_PATTERN ||
+        static_cast<Pattern*>(matrixRows.get())->GetOverlapMatrices()[0].type != OverlapMatrixType::Rows ||
+        static_cast<Pattern*>(matrixRows.get())->GetOverlapMatrices()[1].rows.size() != 2)
+        return Fail("The overlap matrix lost its row structure.");
+    for(const char* expression: {u8"⿻[1:bad]丨日", u8"⿻[x|]丨日",
+            u8"⿻[x|1:2:3]丨日", u8"⿻[x|a|b]一二", u8"⿻[***|x]一二",
+            u8"⿻[x?]一二", u8"⿻[****]一二", u8"⿻[1?:2]一二",
+            u8"⿰[*]甲乙", u8"㇯[*]品口", u8"㇯[-1]品口", u8"㇯[x]品口"})
+        if(ParseIDSOwned(expression) != nullptr)
+            return Fail("An invalid overlay or subtraction modifier was accepted.");
+    std::remove("db/overlay-subtract.sqlite");
+    {
+        std::ofstream source("db/overlay-subtract.dat");
+        source << u8"\uE270\t⿻[:-2]丨日\n";
+        source << u8"\uE271\t⿻[:-1]丨日\n";
+        source << u8"\uE272\t⿻丨日\n";
+        source << u8"\uE273\t⿻[1:]丨日\n";
+        source << u8"\uE276\t⿻[x]丨日\n";
+        source << u8"\uE277\t⿻[r]丨日\n";
+        source << u8"\uE278\t⿻[x,r]丨日\n";
+        source << u8"\uE279\t⿻[x,._,r]丨日\n";
+        source << u8"\uE27A\t⿻[1:|r]丨日\n";
+        source << u8"\uE27B\t⿻[,x]丨日\n";
+        source << u8"品\t⿱口⿰口口\n";
+        source << u8"\uE274\t⿰口口\n";
+        source << u8"\uE275\t⿱口口\n";
+        source << u8"王\t⿱一土\n";
+        source << u8"土\t⿱十一\n";
+        source << u8"十\t⿻丨一\n";
+        source << u8"工\t⿱一⿱丨一\n";
+        source << u8"干\t⿱一十\n";
+        source << u8"日\t⿴囗一\n";
+        source << u8"囗\t{囗}#(-丨𠃍-一z)\n";
+        source << u8"口\t#(-丨𠃍-一z)\n";
+    }
+    {
+        IDSdatabase disambiguationDatabase("overlay-subtract");
+        if(disambiguationDatabase.ImportDB("db/overlay-subtract.dat") != 0)
+            return Fail("Overlay/subtraction disambiguation fixture could not be imported.");
+        if(!ExpectMatch(disambiguationDatabase, u8"⿻[:-2]丨日", u8"\uE270") ||
+            !ExpectMatch(disambiguationDatabase, u8"⿻[:-2]丨日", u8"\uE271") ||
+            !ExpectMatch(disambiguationDatabase, u8"⿻[:-2]丨日", u8"\uE272") ||
+            !ExpectMatch(disambiguationDatabase, u8"⿻[1:]丨日", u8"\uE273"))
+            return Fail("Overlay matching unexpectedly restricted the crossing modifier.");
+        IDSqueryOptions constrainedOverlap;
+        constrainedOverlap.overlapMatchMode = IDS_OVERLAP_MATCH_CONSTRAINED;
+        if(!ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[:-2]丨日", constrainedOverlap, u8"\uE270") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[:-2]丨日", constrainedOverlap, u8"\uE271") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[:-2]丨日", constrainedOverlap, u8"\uE272") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻丨日", constrainedOverlap, u8"\uE272") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻丨日", constrainedOverlap, u8"\uE270") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[***]丨日", constrainedOverlap, u8"\uE272") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[***]丨日", constrainedOverlap, u8"\uE27A") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[**]丨日", constrainedOverlap, u8"\uE276") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[**]丨日", constrainedOverlap, u8"\uE272") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[**]丨日", constrainedOverlap, u8"\uE27A"))
+            return Fail("Constrained overlap matching did not distinguish modifier shape and matrix count.");
+        if(!ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[*:*]丨日", constrainedOverlap, u8"\uE270") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[*:*]丨日", constrainedOverlap, u8"\uE273") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[*:*]丨日", constrainedOverlap, u8"\uE276") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[?]丨日", constrainedOverlap, u8"\uE276") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[?]丨日", constrainedOverlap, u8"\uE278") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[*]丨日", constrainedOverlap, u8"\uE278") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[*]丨日", constrainedOverlap, u8"\uE270") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[x,?]丨日", constrainedOverlap, u8"\uE278") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[x,?]丨日", constrainedOverlap, u8"\uE279") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[x,*]丨日", constrainedOverlap, u8"\uE279") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[x,*]丨日", constrainedOverlap, u8"\uE276") ||
+            !ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[**|**]丨日", constrainedOverlap, u8"\uE27A") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[**|**]丨日", constrainedOverlap, u8"\uE278"))
+            return Fail("Constrained overlap wildcard matching lost its row or matrix semantics.");
+        if(!ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[?,x]丨日", constrainedOverlap, u8"\uE27B") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"⿻[?,x]丨日", constrainedOverlap, u8"\uE278"))
+            return Fail("A single-row overlap wildcard did not match an empty row.");
+        if(!ExpectMatchWithOptions(disambiguationDatabase, u8"<search=⿻[?]丨日>", constrainedOverlap,
+               u8"\uE276") ||
+            ExpectMatchWithOptions(disambiguationDatabase, u8"<search=⿻[?]丨日>", constrainedOverlap,
+                u8"\uE278"))
+            return Fail("Component search did not preserve constrained overlap matching.");
+        if(!ExpectMatch(disambiguationDatabase, u8"㇯品口", u8"\uE274") ||
+            ExpectMatch(disambiguationDatabase, u8"㇯品口", u8"\uE275") ||
+            !ExpectMatch(disambiguationDatabase, u8"㇯[1]品口", u8"\uE275") ||
+            ExpectMatch(disambiguationDatabase, u8"㇯[3]品口", u8"\uE274"))
+            return Fail("Subtraction did not select exactly the indexed component.");
+        if(!ExpectMatch(disambiguationDatabase, u8"㇯王一", u8"土") ||
+            !ExpectMatch(disambiguationDatabase, u8"㇯[1]王一", u8"工") ||
+            ExpectMatch(disambiguationDatabase, u8"㇯[1]王一", u8"干") ||
+            !ExpectMatch(disambiguationDatabase, u8"㇯[2]王一", u8"干"))
+            return Fail("Indexed subtraction did not follow nested 王 strokes in visual order.");
+        if(!ExpectMatch(disambiguationDatabase, u8"㇯日一", u8"口") ||
+            ExpectMatch(disambiguationDatabase, u8"㇯[1]日一", u8"口"))
+            return Fail("Subtraction crossed a stroke-chain boundary or retained a source-only unique label.");
+    }
+    struct CornerCase {
+        const char* enclosure;
+        const char* regrouped;
+        const char* enclosedGlyph;
+        const char* regroupedGlyph;
+    };
+    const CornerCase cornerCases[] = {
+        {u8"⿸⿱甲乙丙", u8"⿱甲⿸乙丙", u8"\uE208", u8"\uE210"},
+        {u8"⿸⿰甲乙丙", u8"⿰甲⿸乙丙", u8"\uE209", u8"\uE211"},
+        {u8"⿹⿱甲乙丙", u8"⿱甲⿹乙丙", u8"\uE20A", u8"\uE212"},
+        {u8"⿹⿰甲乙丙", u8"⿰⿹甲丙乙", u8"\uE20B", u8"\uE213"},
+        {u8"⿺⿱甲乙丙", u8"⿱⿺甲丙乙", u8"\uE20C", u8"\uE214"},
+        {u8"⿺⿰甲乙丙", u8"⿰甲⿺乙丙", u8"\uE20D", u8"\uE215"},
+        {u8"⿽⿱甲乙丙", u8"⿱⿽甲丙乙", u8"\uE20E", u8"\uE216"},
+        {u8"⿽⿰甲乙丙", u8"⿰⿽甲丙乙", u8"\uE20F", u8"\uE217"},
+    };
+    struct InternalCase {
+        const char* left;
+        const char* middle;
+        const char* vertical;
+        const char* horizontal;
+        const char* leftGlyph;
+        const char* middleGlyph;
+    };
+    const InternalCase internalCases[] = {
+        {u8"⿸⿸甲乙丙", u8"⿸甲⿸乙丙", u8"⿸甲⿱乙丙", u8"⿸甲⿰乙丙", u8"\uE240", u8"\uE241"},
+        {u8"⿹⿹甲乙丙", u8"⿹甲⿹乙丙", u8"⿹甲⿱乙丙", u8"⿹甲⿰丙乙", u8"\uE242", u8"\uE243"},
+        {u8"⿺⿺甲乙丙", u8"⿺甲⿺乙丙", u8"⿺甲⿱丙乙", u8"⿺甲⿰乙丙", u8"\uE244", u8"\uE245"},
+        {u8"⿽⿽甲乙丙", u8"⿽甲⿽乙丙", u8"⿽甲⿱丙乙", u8"⿽甲⿰丙乙", u8"\uE246", u8"\uE247"},
+        {u8"⿵⿵甲乙丙", u8"⿵甲⿵乙丙", u8"⿵甲⿱乙丙", nullptr, u8"\uE248", u8"\uE249"},
+        {u8"⿶⿶甲乙丙", u8"⿶甲⿶乙丙", u8"⿶甲⿱丙乙", nullptr, u8"\uE24A", u8"\uE24B"},
+        {u8"⿷⿷甲乙丙", u8"⿷甲⿷乙丙", nullptr, u8"⿷甲⿰乙丙", u8"\uE24C", u8"\uE24D"},
+        {u8"⿼⿼甲乙丙", u8"⿼甲⿼乙丙", nullptr, u8"⿼甲⿰丙乙", u8"\uE24E", u8"\uE24F"},
+    };
+    struct PositionCase {
+        const char* idc;
+        const char* unpositionedGlyph;
+        const char* positionedGlyph;
+    };
+    const PositionCase positionCases[] = {
+        {u8"⿴", u8"\uE280", u8"\uE281"}, {u8"⿵", u8"\uE282", u8"\uE283"},
+        {u8"⿶", u8"\uE284", u8"\uE285"}, {u8"⿷", u8"\uE286", u8"\uE287"},
+        {u8"⿼", u8"\uE288", u8"\uE289"}, {u8"⿸", u8"\uE28A", u8"\uE28B"},
+        {u8"⿹", u8"\uE28C", u8"\uE28D"}, {u8"⿺", u8"\uE28E", u8"\uE28F"},
+        {u8"⿽", u8"\uE290", u8"\uE291"},
+    };
+    struct LayoutCase {
+        const char* expressions[3];
+        const char* glyphs[3];
+    };
+    const LayoutCase layoutCases[] = {
+        {{u8"⿰甲⿱乙丙", u8"⿸⿰甲乙丙", u8"⿺⿰甲丙乙"},
+            {u8"\uE2A0", u8"\uE2A1", u8"\uE2A2"}},
+        {{u8"⿰⿱甲乙丙", u8"⿹⿰甲丙乙", u8"⿽⿰乙丙甲"},
+            {u8"\uE2A3", u8"\uE2A4", u8"\uE2A5"}},
+        {{u8"⿱甲⿰乙丙", u8"⿸⿱甲乙丙", u8"⿹⿱甲丙乙"},
+            {u8"\uE2A6", u8"\uE2A7", u8"\uE2A8"}},
+        {{u8"⿱⿰甲乙丙", u8"⿺⿱甲丙乙", u8"⿽⿱乙丙甲"},
+            {u8"\uE2A9", u8"\uE2AA", u8"\uE2AB"}},
+    };
+    std::remove("db/enclosure-reassociation.sqlite");
+    {
+        std::ofstream source("db/enclosure-reassociation.dat");
+        source << u8"𲓜\t⿱十冂\n";
+        source << u8"南\t⿵𲓜𢆉\n";
+        source << u8"亡\t⿱亠𠃊\n";
+        source << u8"亠\t⿱丶一\n";
+        source << u8"吂\t⿱亡口\n";
+        source << u8"𣎆\t⿱吂䏎\n";
+        source << u8"赢\t⿵𣎆贝\n";
+        source << u8"冋\t⿵冂口\n";
+        source << u8"肉\t⿵内人d\n";
+        source << u8"䯧\t⿳亠口⿱冖冋\n";
+        source << u8"䐡\t⿳亠⿲刀丫𱍸肉\n";
+        source << u8"\uE200\t⿵⿱甲乙丙\n";
+        source << u8"\uE201\t⿶⿱甲乙丙\n";
+        source << u8"\uE202\t⿷⿰甲乙丙\n";
+        source << u8"\uE203\t⿼⿰甲乙丙\n";
+        source << u8"\uE204\t⿱甲⿵乙丙\n";
+        source << u8"\uE205\t⿱⿶甲丙乙\n";
+        source << u8"\uE206\t⿰甲⿷乙丙\n";
+        source << u8"\uE207\t⿰⿼甲丙乙\n";
+        source << u8"\uE218\t⿱丁⿱甲⿵乙丙\n";
+        source << u8"\uE219\t⿱丁⿱⿶甲乙丙\n";
+        source << u8"\uE21A\t⿰丁⿰甲⿷乙丙\n";
+        source << u8"\uE21B\t⿰丁⿰⿼甲乙丙\n";
+        source << u8"\uE230\t⿵[1]⿱甲乙丙\n";
+        for(const PositionCase& position: positionCases) {
+            source << position.unpositionedGlyph << '\t' << position.idc << u8"甲乙\n";
+            source << position.positionedGlyph << '\t' << position.idc << u8"[1]甲乙\n";
+        }
+        source << u8"\uE292\t⿵[*]甲乙\n";
+        for(const CornerCase& corner: cornerCases) {
+            source << corner.enclosedGlyph << '\t' << corner.enclosure << '\n';
+            source << corner.regroupedGlyph << '\t' << corner.regrouped << '\n';
+        }
+        for(const InternalCase& internal: internalCases) {
+            source << internal.leftGlyph << '\t' << internal.left << '\n';
+            source << internal.middleGlyph << '\t' << internal.middle << '\n';
+        }
+        source << u8"\uE250\t⿸甲⿱乙丙\n";
+        source << u8"\uE251\t⿵[1]⿵甲乙丙\n";
+        source << u8"\uE254\t⿵甲⿱乙丙\n";
+        source << u8"屎\t⿸尸米\n";
+        source << u8"娄\t⿱米女\n";
+        source << u8"\uE252\t⿸屎女\n";
+        source << u8"\uE253\t⿵⿵[1]甲乙丙\n";
+        source << u8"闩\t⿵门一\n";
+        source << u8"𠫔\t⿱一厶\n";
+        source << u8"𠮛\t⿱一口\n";
+        source << u8"至\t⿱𠫔土\n";
+        source << u8"畐\t⿱𠮛田\n";
+        source << u8"可\t⿱一𠮝\n";
+        source << u8"𨸅\t⿵门至\n";
+        source << u8"𨸆\t⿵门畐\n";
+        source << u8"𬮠\t⿵门可\n";
+        source << u8"文.d\t⿱亠乂d\n";
+        source << u8"文K\t⿱亠J乂J\n";
+        source << u8"闵\t⿵门文.d\n";
+        source << u8"𫔳\t⿵门⿱文K𰀁\n";
+        source << u8"\uE260\t#(H)\n";
+        source << u8"\uE260t\t#(T)\n";
+        source << u8"\uE255\t⿵门⿱\uE260𰀁\n";
+        for(const LayoutCase& layout: layoutCases)
+            for(size_t index = 0; index < 3; ++index)
+                source << layout.glyphs[index] << '\t' << layout.expressions[index] << '\n';
+        source << u8"\uE2AC\t⿸[1]⿰甲乙丙\n";
+        source << u8"\uE2AD\t⿰甲⿱甲乙\n";
+        source << u8"㫃\t⿰方人\n介\t⿱人⿰丿丨\n斺\t⿰方介\n";
+    }
+    {
+        IDSdatabase enclosureDatabase("enclosure-reassociation");
+        if(enclosureDatabase.ImportDB("db/enclosure-reassociation.dat") != 0)
+            return Fail("The enclosure reassociation fixture could not be imported.");
+        IDSqueryOptions strictEnclosure;
+        strictEnclosure.strictEnclosureMatch = true;
+        for(const LayoutCase& layout: layoutCases)
+            for(size_t queryIndex = 0; queryIndex < 3; ++queryIndex)
+                for(size_t glyphIndex = 0; glyphIndex < 3; ++glyphIndex) {
+                    const char* expression = layout.expressions[queryIndex];
+                    const char* glyph = layout.glyphs[glyphIndex];
+                    if(!ExpectMatch(enclosureDatabase, expression, glyph) ||
+                        ExpectMatchWithOptions(enclosureDatabase, expression, strictEnclosure, glyph) !=
+                            (queryIndex == glyphIndex))
+                        return Fail("A corner-layout approximation lost its direction or strict-mode boundary.");
+                    const std::string search = std::string("<search=") + expression + ">";
+                    if(!ExpectMatch(enclosureDatabase, search.c_str(), glyph) ||
+                        ExpectMatchWithOptions(enclosureDatabase, search.c_str(), strictEnclosure, glyph) !=
+                            (queryIndex == glyphIndex))
+                        return Fail("Search did not honor the corner-layout strict-mode boundary.");
+                }
+        if(!ExpectMatch(enclosureDatabase, u8"⿸㫃⬚", u8"斺") ||
+            ExpectMatchWithOptions(enclosureDatabase, u8"⿸㫃⬚", strictEnclosure, u8"斺") ||
+            !ExpectMatch(enclosureDatabase, u8"<search=⿸㫃⬚>", u8"斺") ||
+            ExpectMatchWithOptions(enclosureDatabase, u8"<search=⿸㫃⬚>", strictEnclosure, u8"斺"))
+            return Fail("The encoded wrapper 㫃 did not honor approximate versus strict matching.");
+        if(ExpectMatch(enclosureDatabase, u8"⿸⿰甲乙丁", u8"\uE2A0"))
+            return Fail("Corner-layout approximation ignored a constrained component.");
+        if(ExpectMatch(enclosureDatabase, u8"⿰甲⿱乙丙", u8"\uE2AC"))
+            return Fail("Corner-layout approximation ignored the candidate position.");
+        if(ExpectMatch(enclosureDatabase, u8"⿸[1]⿰甲乙丙", u8"\uE2A0"))
+            return Fail("Corner-layout approximation ignored the query position.");
+        // 直接匹配归一化树，避免查询预处理重新计算手工构造的来源标记。
+        IDSOwner originBoundaryQuery = ParseIDSOwned(u8"⿸▥[甲=0:2](甲乙)丙");
+        if(originBoundaryQuery == nullptr ||
+            HasIdeograph(enclosureDatabase.Match(originBoundaryQuery.get()), u8"\uE2A0"))
+            return Fail("Corner-layout approximation crossed an HV origin boundary.");
+        if(!ExpectMatch(enclosureDatabase, u8"⿸⿰<var=a><var=a>乙", u8"\uE2AD") ||
+            ExpectMatch(enclosureDatabase, u8"⿸⿰<var=a><var=a>丙", u8"\uE2A0"))
+            return Fail("Corner-layout approximation lost repeated-variable bindings.");
+        IDSOwner approximateQuery = ParseIDSOwned(u8"⿸㫃⬚");
+        const auto approximateDetails = enclosureDatabase.MatchDetailed(approximateQuery.get());
+        const auto strictDetails = enclosureDatabase.MatchDetailed(approximateQuery.get(), strictEnclosure);
+        if(std::none_of(approximateDetails.begin(), approximateDetails.end(), [](const IDSMatchDetail& detail) {
+                return detail.glyph == Ideograph(u8"斺");
+            }) || std::any_of(strictDetails.begin(), strictDetails.end(), [](const IDSMatchDetail& detail) {
+                return detail.glyph == Ideograph(u8"斺");
+            }))
+            return Fail("Detailed matching did not honor the enclosure option.");
+        if(!enclosureDatabase.GetRawIDSOwned(Ideograph(u8"\uE292")).empty() ||
+            enclosureDatabase.GetLastImportReport().rejectedExpressions != 1)
+            return Fail("An enclosing position wildcard was stored as database data.");
+        for(const PositionCase& position: positionCases) {
+            const std::string wildcardQuery = std::string(position.idc) + u8"[*]甲乙";
+            const std::string exactQuery = std::string(position.idc) + u8"甲乙";
+            if(!ExpectMatch(enclosureDatabase, wildcardQuery.c_str(), position.unpositionedGlyph) ||
+                !ExpectMatch(enclosureDatabase, wildcardQuery.c_str(), position.positionedGlyph) ||
+                !ExpectMatch(enclosureDatabase, exactQuery.c_str(), position.unpositionedGlyph) ||
+                ExpectMatch(enclosureDatabase, exactQuery.c_str(), position.positionedGlyph))
+                return Fail("An enclosing position wildcard did not include both zero and nonzero positions.");
+        }
+        if(!ExpectMatch(enclosureDatabase, u8"<search=⿵[*]甲乙>", u8"\uE283"))
+            return Fail("Component search lost an enclosing position wildcard.");
+        if(!ExpectMatch(enclosureDatabase, u8"⿱十⬚", u8"南") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱亡⿵⬚⬚", u8"赢") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱亠⿵⬚⬚", u8"䯧") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱亠⿵⬚⬚", u8"䐡") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱亠⿵⿳口冖冂口", u8"䯧") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱丁⿵⬚⬚", u8"\uE218") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱丁⿶⬚⬚", u8"\uE219") ||
+            !ExpectMatch(enclosureDatabase, u8"⿰丁⿷⬚⬚", u8"\uE21A") ||
+            !ExpectMatch(enclosureDatabase, u8"⿰丁⿼⬚⬚", u8"\uE21B") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱甲⿵乙丙", u8"\uE200") ||
+            !ExpectMatch(enclosureDatabase, u8"⿱⿶甲丙乙", u8"\uE201") ||
+            !ExpectMatch(enclosureDatabase, u8"⿰甲⿷乙丙", u8"\uE202") ||
+            !ExpectMatch(enclosureDatabase, u8"⿰⿼甲丙乙", u8"\uE203") ||
+            !ExpectMatch(enclosureDatabase, u8"⿵⿱甲乙丙", u8"\uE204") ||
+            !ExpectMatch(enclosureDatabase, u8"⿶⿱甲乙丙", u8"\uE205") ||
+            !ExpectMatch(enclosureDatabase, u8"⿷⿰甲乙丙", u8"\uE206") ||
+            !ExpectMatch(enclosureDatabase, u8"⿼⿰甲乙丙", u8"\uE207"))
+            return Fail("A directional enclosure reassociation did not match in both directions.");
+        if(ExpectMatch(enclosureDatabase, u8"⿱甲⿵乙丁", u8"\uE200") ||
+            ExpectMatch(enclosureDatabase, u8"⿱亡⿵⬚女", u8"赢") ||
+            ExpectMatch(enclosureDatabase, u8"⿱亠⿵⬚女", u8"䯧") ||
+            ExpectMatch(enclosureDatabase, u8"⿱亠⿵⬚女", u8"䐡") ||
+            ExpectMatch(enclosureDatabase, u8"⿱丁⿵⬚戊", u8"\uE218"))
+            return Fail("Enclosure reassociation ignored a constrained inner component.");
+        for(const CornerCase& corner: cornerCases)
+            if(!ExpectMatch(enclosureDatabase, corner.regrouped, corner.enclosedGlyph) ||
+                !ExpectMatch(enclosureDatabase, corner.enclosure, corner.regroupedGlyph) ||
+                !ExpectMatchWithOptions(enclosureDatabase, corner.regrouped, strictEnclosure, corner.enclosedGlyph) ||
+                !ExpectMatchWithOptions(enclosureDatabase, corner.enclosure, strictEnclosure, corner.regroupedGlyph))
+                return Fail("A corner enclosure did not reassociate with its HV arrangement.");
+        if(ExpectMatch(enclosureDatabase, u8"⿱甲⿵乙丙", u8"\uE230") ||
+            ExpectMatch(enclosureDatabase, u8"⿵⿱甲乙丙", u8"\uE230"))
+            return Fail("A positioned enclosure matched an unpositioned query.");
+        for(const InternalCase& internal: internalCases) {
+            if(!ExpectMatch(enclosureDatabase, internal.middle, internal.leftGlyph) ||
+                !ExpectMatch(enclosureDatabase, internal.left, internal.middleGlyph) ||
+                !ExpectMatchWithOptions(enclosureDatabase, internal.middle, strictEnclosure, internal.leftGlyph) ||
+                !ExpectMatchWithOptions(enclosureDatabase, internal.left, strictEnclosure, internal.middleGlyph))
+                return Fail("An exact internal enclosure reassociation did not match.");
+            for(const char* query: {internal.vertical, internal.horizontal})
+                if(query != nullptr) {
+                    if(!ExpectMatch(enclosureDatabase, query, internal.leftGlyph) ||
+                        !ExpectMatch(enclosureDatabase, query, internal.middleGlyph) ||
+                        ExpectMatchWithOptions(enclosureDatabase, query, strictEnclosure, internal.leftGlyph) ||
+                        ExpectMatchWithOptions(enclosureDatabase, query, strictEnclosure, internal.middleGlyph))
+                        return Fail("A directional internal enclosure relaxation did not match.");
+                    const std::string searchQuery = std::string("<search=") + query + ">";
+                    if(!ExpectMatch(enclosureDatabase, searchQuery.c_str(), internal.leftGlyph) ||
+                        !ExpectMatch(enclosureDatabase, searchQuery.c_str(), internal.middleGlyph))
+                        return Fail("Component search missed an internally reassociated enclosure.");
+                }
+        }
+        if(!ExpectMatch(enclosureDatabase, u8"⿸⿸甲乙丙", u8"\uE250") ||
+            !ExpectMatch(enclosureDatabase, u8"⿵⿵甲乙丙", u8"\uE254"))
+            return Fail("An internal enclosure relaxation failed in the reverse direction.");
+        if(ExpectMatch(enclosureDatabase, u8"⿵甲⿱乙丙", u8"\uE251") ||
+            ExpectMatch(enclosureDatabase, u8"⿵甲⿱乙丙", u8"\uE253"))
+            return Fail("An internal enclosure relaxation ignored its position.");
+        if(!ExpectMatch(enclosureDatabase, u8"⿸尸⿱米女", u8"\uE252"))
+            return Fail("An encoded enclosing component did not expand for internal reassociation.");
+        for(const char* glyph: {u8"𨸅", u8"𨸆", u8"𬮠"})
+            if(!ExpectMatch(enclosureDatabase, u8"⿵闩⬚", glyph) ||
+                !ExpectMatch(enclosureDatabase, u8"<search=⿵闩⬚>", glyph))
+                return Fail("The enclosing component 闩 did not match its expanded form.");
+        if(!ExpectMatch(enclosureDatabase, u8"⿵闵⬚", u8"𫔳") ||
+            !ExpectMatch(enclosureDatabase, u8"<search=⿵闵⬚>", u8"𫔳"))
+            return Fail("A moved component lost its ordinary suffix-insensitive glyph match.");
+        if(ExpectMatch(enclosureDatabase, u8"⿵⿵门\uE260t⬚", u8"\uE255"))
+            return Fail("Internal enclosure matching ignored a single-stroke suffix.");
+    }
+    std::remove("db/enclosure-reassociation.dat");
+    std::remove("db/enclosure-reassociation.sqlite");
+
     IDSOwner basicStroke = ParseIDSOwned("#(S)");
     if(basicStroke == nullptr || basicStroke->GetType() != IDS_STROKE)
         return Fail("A standalone abstract stroke did not parse.");
@@ -234,6 +626,53 @@ int main() {
     if(!yibaiStrokeImported)
         return Fail("A YiBai stroke expression did not import.");
 
+    std::remove("db/yibai-variants.sqlite");
+    {
+        std::ofstream source("db/yibai-variants.dat");
+        source << u8"\uE2A0\t⿰一二(.,T)\t⿱一二(J,J);⿱二一(.,T)\n";
+    }
+    auto checkYiBaiVariants = []() {
+        IDSdatabase database("yibai-variants");
+        const IDSOwnerList base = database.GetRawIDSOwned(Ideograph(u8"\uE2A0"));
+        const IDSOwnerList t = database.GetRawIDSOwned(Ideograph(u8"\uE2A0T"));
+        const IDSOwnerList j = database.GetRawIDSOwned(Ideograph(u8"\uE2A0J"));
+        return base.size() == 2 && t.size() == 2 && j.size() == 1 &&
+            base[0]->toString() == u8"⿰一二" && !base[0]->IsAlternativeDefinition() &&
+            base[1]->toString() == u8"⿱二一" && base[1]->IsAlternativeDefinition() &&
+            t[0]->toString() == u8"⿰一二" && !t[0]->IsAlternativeDefinition() &&
+            t[1]->toString() == u8"⿱二一" && t[1]->IsAlternativeDefinition() &&
+            j[0]->toString() == u8"⿱一二" && j[0]->IsAlternativeDefinition();
+    };
+    {
+        IDSdatabase database("yibai-variants");
+        if(database.ImportDB("db/yibai-variants.dat", IDSDB_YIBAI) != 0 || !checkYiBaiVariants())
+            return Fail("YiBai comma-separated variants or definition-group flags were lost during import.");
+    }
+    if(!checkYiBaiVariants()) return Fail("YiBai definition-group flags were lost after reopening SQLite.");
+    sqlite3* variantsSqlite = nullptr;
+    if(sqlite3_open("db/yibai-variants.sqlite", &variantsSqlite) != SQLITE_OK)
+        return Fail("Could not open the YiBai variant fixture database.");
+    sqlite3_stmt* variantsStatement = nullptr;
+    const bool hasThreeAlternativeRows = sqlite3_prepare_v2(variantsSqlite,
+        "SELECT COUNT(*) FROM ids_entries WHERE is_alternative = 1", -1, &variantsStatement, nullptr) == SQLITE_OK &&
+        sqlite3_step(variantsStatement) == SQLITE_ROW && sqlite3_column_int(variantsStatement, 0) == 3;
+    if(variantsStatement != nullptr) sqlite3_finalize(variantsStatement);
+    sqlite3_close(variantsSqlite);
+    if(!hasThreeAlternativeRows) return Fail("YiBai alternative-definition metadata was not saved in SQLite.");
+    std::remove("db/yibai-variants.dat");
+    std::remove("db/yibai-variants.sqlite");
+    {
+        std::ofstream source("db/yibai-empty-variant.dat");
+        source << u8"\uE2A1\t⿰一二(.,)\n";
+    }
+    {
+        IDSdatabase database("yibai-empty-variant");
+        if(database.ImportDB("db/yibai-empty-variant.dat", IDSDB_YIBAI) == 0 ||
+            database.GetLastError().find("line 1, IDS #1") == std::string::npos)
+            return Fail("An empty YiBai variant identifier was not reported with its source location.");
+    }
+    std::remove("db/yibai-empty-variant.dat");
+
     // YiBai 私有库可能使用单独的 CR 换行；相邻字形不能因此合并。
     std::remove("db/yibai-cr-private.sqlite");
     {
@@ -304,8 +743,14 @@ int main() {
         const std::vector<Ideograph> secondLocaleMatches =
             localeDatabase.MatchQuery(secondLocaleQuery.get(), localeOptions);
         if(firstLocaleMatches.size() != 1 || !HasIdeograph(firstLocaleMatches, u8"甲C") ||
-            !secondLocaleMatches.empty())
-            return Fail("Strict locale fallback filtering did not require a matched base glyph.");
+            HasIdeograph(firstLocaleMatches, u8"丙J") || secondLocaleMatches.size() != 1 ||
+            !HasIdeograph(secondLocaleMatches, u8"乙T"))
+            return Fail(
+                "Locale filtering did not preserve a matched base, reject a nonmatching base variant, and fall back to 乙T when the base is absent.");
+        IDSqueryOptions noLocaleFallbackOptions = localeOptions;
+        noLocaleFallbackOptions.filter.localeSuffixFallbackOrder.clear();
+        if(!localeDatabase.MatchQuery(secondLocaleQuery.get(), noLocaleFallbackOptions).empty())
+            return Fail("Strict locale filtering used a locale variant without an explicit fallback order.");
         std::remove("db/locale-order.dat");
         std::remove("db/locale-order.sqlite");
     }
@@ -391,6 +836,13 @@ int main() {
         source << u8"丙\t{?0}⿱一二\n";
         source << u8"丁\t⿱一二\n";
         source << u8"㞷\t⿱屮王\n";
+        source << u8"折\t⿰扌斤\n";
+        source << u8"二\t{二}⿱一一\n";
+        source << u8"亍\t⿱一一\n";
+        source << u8"三\t⿱二一\n";
+        source << u8"亠\t⿱丶一\n";
+        source << u8"言\t⿳亠二口\t⿳丶三口\n";
+        source << u8"誓\t⿱折言\n";
     }
     {
         IDSdatabase hvOriginDatabase("hv-origin");
@@ -429,6 +881,30 @@ int main() {
             return Fail("HV recursion ignored the unique source of 曰.");
         if(!ExpectMatch(hvOriginDatabase, u8"<search=曰,欠>", u8"欥"))
             return Fail("HV recursion rejected the actual unique source 曰.");
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=言,斤>", u8"誓") ||
+            !ExpectMatch(hvOriginDatabase, u8"<search=斤,言>", u8"誓"))
+            return Fail("Search lost a raw IDS component after HV expansion.");
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=口,亠>", u8"言") ||
+            !ExpectMatch(hvOriginDatabase, u8"<search=口,二,亠>", u8"言"))
+            return Fail("Search did not consume distinct components in one raw 言 definition.");
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=口,亠,斤>", u8"誓") ||
+            !ExpectMatch(hvOriginDatabase, u8"<search=口,二,亠,斤>", u8"誓"))
+            return Fail("Search lost nested raw IDS components across 誓 and 言.");
+        IDSOwner nestedOathQuery = ParseIDSOwned(u8"<search=口,亠,斤>");
+        const std::vector<IDSMatchDetail> nestedOathDetails = hvOriginDatabase.MatchDetailed(nestedOathQuery.get());
+        const auto nestedOath =
+            std::find_if(nestedOathDetails.begin(), nestedOathDetails.end(), [](const IDSMatchDetail& detail) {
+                return detail.glyph == Ideograph(u8"誓");
+            });
+        if(nestedOath == nestedOathDetails.end() || nestedOath->matchSource != IDS_MATCH_SOURCE_RAW_IDS)
+            return Fail("Nested raw IDS search did not preserve its match detail source.");
+        IDSOwner oathQuery = ParseIDSOwned(u8"<search=言,斤>");
+        const std::vector<IDSMatchDetail> oathDetails = hvOriginDatabase.MatchDetailed(oathQuery.get());
+        const auto oath = std::find_if(oathDetails.begin(), oathDetails.end(), [](const IDSMatchDetail& detail) {
+            return detail.glyph == Ideograph(u8"誓");
+        });
+        if(oath == oathDetails.end() || oath->matchSource != IDS_MATCH_SOURCE_RAW_IDS)
+            return Fail("The restored raw IDS match did not report its actual source.");
         hvOriginDatabase.config.fuzzyMatch.excludeNonEquivalentSameIDS = false;
         if(!ExpectMatch(hvOriginDatabase, u8"<search=日,欠>", u8"欥"))
             return Fail("Disabling same-IDS exclusion did not restore the variant match.");
@@ -472,6 +948,34 @@ int main() {
         return Fail("A full-import target unexpectedly loaded the database it will replace.");
     IDSdatabase database("replace-query");
     if(database.isEmpty()) return Fail("The SQLite test database did not reload.");
+
+    IDSOwner profileQuery = ParseIDSOwned(u8"<search=木>");
+    if(profileQuery == nullptr) return Fail("The query profiling fixture did not parse.");
+    const std::vector<Ideograph> unprofiledMatches = database.MatchQuery(profileQuery.get());
+    IDSQueryProfile profile;
+    IDSqueryOptions profileOptions;
+    profileOptions.profile = &profile;
+    const std::vector<Ideograph> profiledMatches = database.MatchQuery(profileQuery.get(), profileOptions);
+    if(profiledMatches != unprofiledMatches || profile.equivalentQueries == 0 || profile.indexAttempts == 0 ||
+        profile.visitedGlyphs == 0 || profile.evaluatedGlyphs == 0 || profile.entryMatchAttempts == 0)
+        return Fail("Query profiling changed matches or omitted scan counters.");
+    profile = IDSQueryProfile();
+    const std::vector<IDSMatchDetail> profiledDetails = database.MatchDetailed(profileQuery.get(), profileOptions);
+    if(profile.detailedGlyphs != unprofiledMatches.size() || profiledDetails.size() != unprofiledMatches.size())
+        return Fail("Detailed query profiling did not account for every matched glyph.");
+
+    IDSOwner structuredComponentQuery = ParseIDSOwned(u8"<search=合>");
+    if(structuredComponentQuery == nullptr) return Fail("The structured-component index fixture did not parse.");
+    IDSQueryProfile structuredProfile;
+    IDSqueryOptions structuredOptions;
+    structuredOptions.profile = &structuredProfile;
+    const std::vector<IDSMatchDetail> structuredDetails =
+        database.MatchDetailed(structuredComponentQuery.get(), structuredOptions);
+    const auto hvMatch = std::find_if(structuredDetails.begin(), structuredDetails.end(), [](const IDSMatchDetail& detail) {
+        return detail.glyph == Ideograph(u8"㐑") && detail.matchSource == IDS_MATCH_SOURCE_HV_CACHE;
+    });
+    if(structuredProfile.indexedPasses == 0 || hvMatch == structuredDetails.end())
+        return Fail("A structured search component was not indexed without losing its HV match.");
 
     sqlite3* sameExpressionDatabase = nullptr;
     if(sqlite3_open_v2("db/replace-query.sqlite", &sameExpressionDatabase, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
@@ -1216,8 +1720,8 @@ int main() {
     const int reimportedPrivateGlyphRow = QueryCount(
         u8"SELECT COUNT(*) FROM private_glyphs JOIN glyphs ON glyphs.id = private_glyphs.glyph_id "
         "WHERE glyphs.glyph_key = '\uE001'");
-    const int schemaVersion6 =
-        QueryCount("SELECT COUNT(*) FROM metadata WHERE key = 'schema_version' AND value = '6'");
+    const int schemaVersion8 =
+        QueryCount("SELECT COUNT(*) FROM metadata WHERE key = 'schema_version' AND value = '8'");
     const int rawHVFixtureEntries = QueryCount(
         "SELECT COUNT(*) FROM ids_entries JOIN glyphs ON glyphs.id = ids_entries.glyph_id " "WHERE glyphs.glyph_key = '\u340C'");
     const int cachedHVFixtureEntries = QueryCount(
@@ -1236,7 +1740,7 @@ int main() {
         return Fail("The SQLite primary tables did not preserve all IDS stroke-count values.");
     if(queryCacheTable != 1 || rawHVFixtureEntries != 1 || cachedHVFixtureEntries != 2)
         return Fail("The SQLite schema did not persist raw IDS and all HV query-cache alternatives.");
-    if(privateGlyphTable != 1 || reimportedPrivateGlyphRow != 1 || schemaVersion6 != 1)
+    if(privateGlyphTable != 1 || reimportedPrivateGlyphRow != 1 || schemaVersion8 != 1)
         return Fail("The SQLite schema did not persist private IDS glyph metadata.");
     if(iwdsIndexKeyTable != 0 || iwdsIndexEntryTable != 0)
         return Fail("The main IDS SQLite database unexpectedly contains an IWDS inverted cache.");

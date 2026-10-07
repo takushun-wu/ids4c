@@ -47,6 +47,8 @@ protected:
     IDStype _type = IDS_UNKNOWN;
     // IDS.pdf 7.1 根部唯一化分隔符；它是表达式元数据，不是结构部件。
     std::string _uniqueSeparator;
+    // 原始定义属于第三个 TAB 后的另类定义组；不参与 IDS 树结构比较。
+    bool _alternativeDefinition = false;
 
 public:
     IDS()                                 = default;
@@ -59,6 +61,8 @@ public:
     IDStype GetType();
     const std::string& GetUniqueSeparator() const { return _uniqueSeparator; }
     void SetUniqueSeparator(std::string separator) { _uniqueSeparator = std::move(separator); }
+    bool IsAlternativeDefinition() const { return _alternativeDefinition; }
+    void SetAlternativeDefinition(bool alternative) { _alternativeDefinition = alternative; }
 };
 
 /// IDS 节点的拥有型指针；解析函数和返回 IDS 树的 API 优先使用此类型。
@@ -254,6 +258,31 @@ struct HVOriginRange {
     size_t      last  = 0;
 };
 
+enum class OverlapMatrixType { HorizontalIndexing, Rows };
+
+// 仅用于查询中的全/半包围定位；数据库不能存储该值。
+constexpr int IDS_ANY_SURROUND_POSITION = -1;
+
+// 查询专用；数据库中的矩阵只能是 None。
+enum class OverlapWildcard { None, AnyMatrix, AnyModifier };
+
+/// 一个 ⿻ 矩阵；范围端点可省略，Rows 保留空行。
+struct OverlapMatrix {
+    OverlapMatrixType type = OverlapMatrixType::Rows;
+    OverlapWildcard wildcard = OverlapWildcard::None;
+    int first = 0;
+    int last = 0;
+    bool hasFirst = false;
+    bool hasLast = false;
+    bool anyFirst = false;
+    bool anyLast = false;
+    std::vector<std::string> rows;
+
+    std::string toString() const;
+    bool HasQueryWildcard() const;
+    bool operator==(const OverlapMatrix& other) const;
+};
+
 /**
  * @brief IDS 结构节点。
  *
@@ -264,15 +293,16 @@ protected:
     IDCtype                  _idc              = IDC_UNKNOWN;
     IDSOwnerList             _pids             = {};
     size_t                   _preferSplitPoint = -1;
-    int                      _overlayRange[2]  = {0, 0};
-    std::vector<std::string> _overlayType      = {};
+    std::vector<OverlapMatrix> _overlapMatrices;
     int                      _optionalInt      = 0;
     std::vector<HVOriginRange> _hvOriginRanges = {};
 
 public:
     Pattern(IDCtype idc, std::vector<IDS*> pids, size_t preferSplitPoint = -1, int* overlayRange = nullptr,
         std::vector<std::string> overlayType = {}, int optionalInt = 0,
-        std::vector<HVOriginRange> hvOriginRanges = {});
+        std::vector<HVOriginRange> hvOriginRanges = {}, int overlayRangeFlags = 0);
+    Pattern(IDCtype idc, std::vector<IDS*> pids, std::vector<OverlapMatrix> overlapMatrices,
+        size_t preferSplitPoint = -1, int optionalInt = 0, std::vector<HVOriginRange> hvOriginRanges = {});
     Pattern(const Pattern& pattern);
     Pattern(Pattern&& pattern) noexcept;
     ~Pattern();
@@ -288,6 +318,8 @@ public:
     size_t                   GetPreferSplitPoint() const;
     void                     GetOverlayRange(int* output) const;
     std::vector<std::string> GetOverlayType() const;
+    int                      GetOverlayRangeFlags() const;
+    const std::vector<OverlapMatrix>& GetOverlapMatrices() const;
     int                      GetOptionalInt() const;
     const std::vector<HVOriginRange>& GetHVOriginRanges() const;
     void SetHVOriginRanges(std::vector<HVOriginRange> ranges);

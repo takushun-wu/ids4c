@@ -1,6 +1,7 @@
 #include "ids4c/idsconst.h"
 #include "idsdb_internal.h"
 
+#include <functional>
 #include <unordered_set>
 
 namespace {
@@ -56,20 +57,63 @@ void IDSdatabase::BuildDirectComponentIndex() {
     _directComponentIndexReady = true;
 }
 
+bool IDSdatabase::FindRawLiteralSearchCandidates(IDS* query, IdeographSet& candidates) const {
+    candidates.clear();
+    if(!_directComponentIndexReady || !IsSearchExpression(query)) return false;
+
+    const auto& postings = _directComponentIndex[0];
+    const auto& variants = GetSameIDSVariantIndex();
+    std::vector<std::string> pending;
+    std::unordered_set<std::string> seen;
+    std::function<void(IDS*)> collect = [&](IDS* node) {
+        if(IsIdeograph(node)) {
+            const Ideograph& glyph = *AsIdeograph(node);
+            auto append = [&](const Ideograph& variant) {
+                candidates.insert(variant);
+                const std::string key = ComponentKey(variant);
+                if(seen.insert(key).second) pending.push_back(key);
+            };
+            append(glyph);
+            const auto foundVariants = variants.find(glyph);
+            if(foundVariants != variants.end())
+                for(const Ideograph& variant: foundVariants->second) append(variant);
+        } else if(IsPattern(node)) {
+            for(const auto& child: AsPattern(node)->GetpIDSRef()) collect(child.get());
+        } else if(IsSearchExpression(node)) {
+            for(const auto& term: AsSearchExpression(node)->GetTerms()) collect(term.get());
+        }
+    };
+    collect(query);
+    while(!pending.empty()) {
+        const std::string key = std::move(pending.back());
+        pending.pop_back();
+        const auto found = postings.find(key);
+        if(found == postings.end()) continue;
+        for(const Ideograph& owner: found->second) {
+            if(!candidates.insert(owner).second) continue;
+            const std::string ownerKey = ComponentKey(owner);
+            if(seen.insert(ownerKey).second) pending.push_back(ownerKey);
+        }
+        if(candidates.size() >= _idsDB.size() - _idsDB.size() / 4) return false;
+    }
+    return true;
+}
+
 bool IDSdatabase::FindIndexedSearchCandidates(IDS* query, IdeographSet& candidates) {
     candidates.clear();
     if(!_directComponentIndexReady || !IsSearchExpression(query) || _idsDB.empty()) return false;
 
-    auto glyphCandidates = [&](const Ideograph& glyph, IdeographSet& output) {
+    auto directCandidates = [&](const Ideograph& glyph, IdeographSet& output, bool requireStrokeOnly) {
         std::vector<Ideograph> seeds(1, glyph);
         const auto& variants = GetSameIDSVariantIndex();
         const auto foundVariants = variants.find(glyph);
         if(foundVariants != variants.end())
             seeds.insert(seeds.end(), foundVariants->second.begin(), foundVariants->second.end());
 
-        for(const Ideograph& seed: seeds)
-            for(IDS* definition: FindIDS(seed))
-                if(!IsStroke(definition)) return false;
+        if(requireStrokeOnly)
+            for(const Ideograph& seed: seeds)
+                for(IDS* definition: FindIDS(seed))
+                    if(!IsStroke(definition)) return false;
 
         std::vector<std::string> pending;
         std::unordered_set<std::string> seen;
@@ -93,6 +137,44 @@ bool IDSdatabase::FindIndexedSearchCandidates(IDS* query, IdeographSet& candidat
             }
             // 常见部件的闭包接近全库时，继续全扫描通常更便宜。
             if(output.size() >= _idsDB.size() - _idsDB.size() / 4) return false;
+        }
+        return true;
+    };
+
+    auto glyphCandidates = [&](const Ideograph& glyph, IdeographSet& output) {
+        std::vector<Ideograph> seeds(1, glyph);
+        const auto& variants = GetSameIDSVariantIndex();
+        const auto foundVariants = variants.find(glyph);
+        if(foundVariants != variants.end())
+            seeds.insert(seeds.end(), foundVariants->second.begin(), foundVariants->second.end());
+
+        if(!directCandidates(glyph, output, false)) return false;
+        for(const Ideograph& seed: seeds) {
+            for(IDS* definition: FindIDS(seed)) {
+                if(IsStroke(definition)) continue;
+                if(!IsPattern(definition)) return false;
+                Pattern* pattern = AsPattern(definition);
+                const auto& children = pattern->GetpIDSRef();
+                if(!pattern->GetHVOriginRanges().empty() || pattern->GetOptionalInt() != 0 || children.size() < 2)
+                    return false;
+                for(const auto& child: children)
+                    if(!IsIdeograph(child.get())) return false;
+
+                // 固定结构的任一子部件都必须匹配；选闭包最小者作为不漏项的候选锚点。
+                IdeographSet bestAnchor;
+                bool haveAnchor = false;
+                for(const auto& child: children) {
+                    IdeographSet anchor;
+                    if(!directCandidates(*AsIdeograph(child.get()), anchor, true)) continue;
+                    if(!haveAnchor || anchor.size() < bestAnchor.size()) {
+                        bestAnchor = std::move(anchor);
+                        haveAnchor = true;
+                    }
+                }
+                if(!haveAnchor) return false;
+                output.insert(bestAnchor.begin(), bestAnchor.end());
+                if(output.size() >= _idsDB.size() - _idsDB.size() / 4) return false;
+            }
         }
         return true;
     };

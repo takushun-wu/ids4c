@@ -1,4 +1,5 @@
 #include "ids4c/ui.h"
+#include "ids4c/version.h"
 
 #include <algorithm>
 #include <chrono>
@@ -47,6 +48,7 @@ IDSui::IDSui():
     r3Box(Gtk::ORIENTATION_HORIZONTAL, 0),
     r4Box(Gtk::ORIENTATION_HORIZONTAL, 0),
     r5Box(Gtk::ORIENTATION_HORIZONTAL, 0),
+    r6Box(Gtk::ORIENTATION_HORIZONTAL, 0),
     r1BoxEquivalent(Gtk::ORIENTATION_HORIZONTAL, 0),
     equivalentUILabel("Equivalent Syntax:"),
     menuItemFile("_File", true),
@@ -62,6 +64,8 @@ IDSui::IDSui():
     cbIgnoreOverlay(u8"Ignore \u2FFB overlay structures"),
     cbShowDetails("Show match details"),
     cbTrackMatchPaths("Track match paths"),
+    cbStrictEnclosureMatch("Strict enclosure matching"),
+    labelOverlapMatchMode(u8"\u2FFB match:"),
     labelGlyphDomain("Glyphs:"),
     labelUnicodeBlock("Blocks:"),
     unicodeBlockButton("All blocks"),
@@ -94,6 +98,7 @@ IDSui::IDSui():
     CreateRBFilters();
     mainBox.pack_start(r4Box, Gtk::PACK_SHRINK);
     mainBox.pack_start(r5Box, Gtk::PACK_SHRINK);
+    mainBox.pack_start(r6Box, Gtk::PACK_SHRINK);
     mainBox.pack_start(resultScrollBox);
     mainBox.pack_start(statusBar, Gtk::PACK_SHRINK);
     // r1Box
@@ -195,6 +200,14 @@ void IDSui::CreateRBFilters() {
     if(cbUnification.get_active_row_number() < 0) cbUnification.set_active_id("none");
     r5Box.pack_start(cbShowDetails, Gtk::PACK_SHRINK);
     r5Box.pack_start(cbTrackMatchPaths, Gtk::PACK_SHRINK);
+    r6Box.pack_start(cbStrictEnclosureMatch, Gtk::PACK_SHRINK);
+    cbStrictEnclosureMatch.set_active(false);
+    cbStrictEnclosureMatch.set_tooltip_text("Disable approximate enclosure layouts; keep exact reassociation.");
+    r6Box.pack_start(labelOverlapMatchMode, Gtk::PACK_SHRINK);
+    r6Box.pack_start(cbOverlapMatchMode, Gtk::PACK_SHRINK);
+    cbOverlapMatchMode.append("ignore", "Ignore");
+    cbOverlapMatchMode.append("constrained", "Constrained");
+    cbOverlapMatchMode.set_active_id("ignore");
     r5Box.pack_start(labelGlyphDomain, Gtk::PACK_SHRINK);
     r5Box.pack_start(cbGlyphDomain, Gtk::PACK_SHRINK);
     r5Box.pack_start(labelUnicodeBlock, Gtk::PACK_SHRINK);
@@ -217,6 +230,8 @@ void IDSui::CreateRBFilters() {
         if(rbFilterLocaleKeepIVS.get_active()) onQueryOptionsChanged();
     });
     cbIgnoreOverlay.signal_toggled().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
+    cbOverlapMatchMode.signal_changed().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
+    cbStrictEnclosureMatch.signal_toggled().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
     cbShowDetails.signal_toggled().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
     cbTrackMatchPaths.signal_toggled().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
     cbGlyphDomain.signal_changed().connect(sigc::mem_fun(*this, &IDSui::onQueryOptionsChanged));
@@ -336,6 +351,8 @@ void IDSui::onQuery() {
     rbFilterLocale.set_sensitive(false);
     rbFilterLocaleKeepIVS.set_sensitive(false);
     cbIgnoreOverlay.set_sensitive(false);
+    cbOverlapMatchMode.set_sensitive(false);
+    cbStrictEnclosureMatch.set_sensitive(false);
     cbUnification.set_sensitive(false);
     cbShowDetails.set_sensitive(false);
     cbTrackMatchPaths.set_sensitive(false);
@@ -438,6 +455,8 @@ void IDSui::onQueryFinished() {
     rbFilterLocale.set_sensitive(true);
     rbFilterLocaleKeepIVS.set_sensitive(true);
     cbIgnoreOverlay.set_sensitive(true);
+    cbOverlapMatchMode.set_sensitive(true);
+    cbStrictEnclosureMatch.set_sensitive(true);
     cbUnification.set_sensitive(true);
     cbShowDetails.set_sensitive(true);
     cbTrackMatchPaths.set_sensitive(true);
@@ -449,7 +468,9 @@ void IDSui::onQueryFinished() {
 IDSqueryOptions IDSui::GetQueryOptions() const {
     IDSqueryOptions options;
     options.filter.ignoreOverlayStructure = cbIgnoreOverlay.get_active();
+    ParseIDSOverlapMatchMode(std::string(cbOverlapMatchMode.get_active_id()), options.overlapMatchMode);
     options.trackMatchPaths               = cbTrackMatchPaths.get_active();
+    options.strictEnclosureMatch          = cbStrictEnclosureMatch.get_active();
     if(rbFilterLcSuffix.get_active())
         options.filter.resultFilter = IDS_RESULT_IGNORE_LC_SUFFIX;
     else if(rbFilterLocale.get_active())
@@ -699,12 +720,8 @@ void IDSui::onMenuAbout() {
     Gtk::Box dbBox(Gtk::ORIENTATION_VERTICAL);
     dialog->get_content_area()->pack_start(dbBox, Gtk::PACK_SHRINK);
     Gtk::Label  about;
-    auto        now         = std::chrono::system_clock::now();
-    std::time_t now_c       = std::chrono::system_clock::to_time_t(now);
-    std::tm*    local_time  = std::localtime(&now_c);
-    auto        currentYear = local_time->tm_year + 1900;
-    about.set_markup("Han Ideograph Finder, Version " VERSION "\n"
-        "Copyright 2026-" + std::to_string(currentYear) + " Takushun Wu. Licensed under the Apache License, Version 2.0.\n"
+    about.set_markup("Han Ideograph Finder, Version " IDS4C_VERSION_STRING "\n"
+        IDS4C_COPYRIGHT " Licensed under the Apache License, Version 2.0.\n"
         "\n"
         "<a href=\"https://github.com/takushun-wu/\" title=\"GitHub: takushun-wu\">My GitHub Homepage</a>\n"
         "\n"

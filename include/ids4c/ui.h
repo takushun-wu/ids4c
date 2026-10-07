@@ -12,8 +12,6 @@
 
 #include "ids4c/idsdb.h"
 
-#define VERSION "0.3.0"
-
 #define FONTCFG_DEFAULT         "WenJin Mincho Plane 0,WenJin Mincho Plane 2,WenJin Mincho Plane 3"
 #define QUERY_FONTSIZE_DEFAULT  16
 #define RESULT_FONTSIZE_DEFAULT 20
@@ -38,7 +36,7 @@ protected:
     Gtk::Box                      mainBox;
     Gtk::Entry                    entry;
     Gtk::Button                   queryButton;
-    Gtk::Box                      r1Box, r2Box, r3Box, r4Box, r5Box, r1BoxEquivalent;
+    Gtk::Box                      r1Box, r2Box, r3Box, r4Box, r5Box, r6Box, r1BoxEquivalent;
     std::vector<Gtk::Button*>     inputButton, inputButton2;
     Gtk::ScrolledWindow           resultScrollBox;
     Gtk::TextView                 resultBox;
@@ -53,6 +51,9 @@ protected:
     Gtk::RadioButton::Group      rgFilter;
     Gtk::RadioButton             rbFilterAll, rbFilterLcSuffix, rbFilterLocale, rbFilterLocaleKeepIVS;
     Gtk::CheckButton             cbIgnoreOverlay, cbShowDetails, cbTrackMatchPaths;
+    Gtk::CheckButton             cbStrictEnclosureMatch;
+    Gtk::Label                   labelOverlapMatchMode;
+    Gtk::ComboBoxText            cbOverlapMatchMode;
     Gtk::Label                   labelGlyphDomain, labelUnicodeBlock;
     Gtk::ComboBoxText            cbGlyphDomain;
     Gtk::Button                  unicodeBlockButton;
@@ -148,3 +149,4 @@ private:
 };
 
 #endif
+

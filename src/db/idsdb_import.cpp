@@ -2,6 +2,7 @@
 
 #include "idsdb_internal.h"
 
+#include <algorithm>
 #include <fstream>
 #include <unordered_set>
 #include <utility>
@@ -59,7 +60,7 @@ namespace {
         }
 
         std::string              line;
-        std::vector<std::string> lineSplited, lineSplited2, jSuffixSplit;
+        std::vector<std::string> lineSplited, lineSplited2;
         size_t                   lineNumber = 0;
         while(ReadTextLine(file, line)) {
             lineNumber++;
@@ -108,17 +109,22 @@ namespace {
                         std::string              suffix;
                         std::string              parseExpression = expression;
                         std::vector<std::string> glyphs(1, lineKey);
-                        if(jU32pos != std::u32string::npos && !isStrokeGroup) {
-                            suffix = utf8::utf32to8(jU32.substr(jU32pos + 1));
-                            if(!suffix.empty()) suffix.pop_back();
-                            if(suffix != "" && suffix != ".") {
-                                parseExpression = utf8::utf32to8(jU32.substr(0, jU32pos));
-                                jSuffixSplit     = StringSplit(suffix, U';');
-                                glyphs.clear();
-                                for(const std::string& glyphSuffix: jSuffixSplit)
-                                    glyphs.push_back(lineKey + glyphSuffix);
-                            } else if(suffix == ".") {
-                                parseExpression = utf8::utf32to8(jU32.substr(0, jU32pos));
+                        if(jU32pos != std::u32string::npos && !isStrokeGroup && jU32.back() == U')') {
+                            suffix = utf8::utf32to8(jU32.substr(jU32pos + 1, jU32.size() - jU32pos - 2));
+                            const std::vector<std::string> variantIds = StringSplit(suffix, U',');
+                            if(std::any_of(variantIds.begin(), variantIds.end(),
+                                   [](const std::string& variantId) { return variantId.empty(); })) {
+                                error = "Empty variant identifier at line " + std::to_string(lineNumber) +
+                                    ", IDS #" + std::to_string(idsIndex) + ".";
+                                return false;
+                            }
+                            parseExpression = utf8::utf32to8(jU32.substr(0, jU32pos));
+                            glyphs.clear();
+                            for(const std::string& variantId: variantIds) {
+                                const std::string glyph = lineKey + (variantId == "." ? "" : variantId);
+                                if(std::find(glyphs.begin(), glyphs.end(), glyph) != glyphs.end())
+                                    continue;
+                                glyphs.push_back(glyph);
                             }
                         }
 
@@ -128,6 +134,7 @@ namespace {
                         record.glyphs     = std::move(glyphs);
                         record.expression = expression;
                         record.ids        = std::move(parseExpression);
+                        record.isAlternative = index > 1;
                         if(!EmitRecord(emit, record)) {
                             error = "The IDS reader stopped before completing the import.";
                             return false;
@@ -220,6 +227,7 @@ bool IDSdatabase::ParseIDSReader(
                 "query-only or empty IDS expression", nullptr);
             return true;
         }
+        parsed->SetAlternativeDefinition(record.isAlternative);
 
         bool accepted = false;
         for(const std::string& glyphName: record.glyphs) {

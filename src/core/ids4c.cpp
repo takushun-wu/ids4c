@@ -1,6 +1,8 @@
 #include "ids4c/ids4c.h"
 
+#include <algorithm>
 #include <limits>
+#include <stdexcept>
 #include <unordered_map>
 
 const char*  IDCchar[] = {"<invalidIDC>", "⿰", "⿱", "⿲", "⿳", "⿴", "⿵", "⿶", "⿷", "⿼", "⿸", "⿹", "⿺", "⿽",
@@ -321,8 +323,93 @@ bool SearchExpression::operator==(const SearchExpression& search) const {
     return true;
 }
 
+std::string OverlapMatrix::toString() const {
+    if(wildcard == OverlapWildcard::AnyModifier) return "***";
+    if(wildcard == OverlapWildcard::AnyMatrix) return "**";
+    if(type == OverlapMatrixType::HorizontalIndexing)
+        return (anyFirst ? "*" : hasFirst ? std::to_string(first) : "") + ":" +
+            (anyLast ? "*" : hasLast ? std::to_string(last) : "");
+    std::string result;
+    for(size_t index = 0; index < rows.size(); index++) {
+        if(index != 0) result += ",";
+        result += rows[index];
+    }
+    return result;
+}
+
+bool OverlapMatrix::HasQueryWildcard() const {
+    if(wildcard != OverlapWildcard::None || anyFirst || anyLast) return true;
+    return std::any_of(rows.begin(), rows.end(), [](const std::string& row) {
+        return row == "?" || row == "*";
+    });
+}
+
+bool OverlapMatrix::operator==(const OverlapMatrix& other) const {
+    return type == other.type && wildcard == other.wildcard && first == other.first && last == other.last &&
+        hasFirst == other.hasFirst && hasLast == other.hasLast && anyFirst == other.anyFirst &&
+        anyLast == other.anyLast && rows == other.rows;
+}
+
+static bool ParseOverlapMatrix(const std::string& text, OverlapMatrix& output) {
+    if(text == "***" || text == "**") {
+        output.wildcard = text == "***" ? OverlapWildcard::AnyModifier : OverlapWildcard::AnyMatrix;
+        return true;
+    }
+    auto parseNumber = [](const std::string& value, int& number) {
+        if(value.empty()) return true;
+        const size_t digits = value[0] == '-' ? 1 : 0;
+        if(digits == value.size() ||
+            value.find_first_not_of("0123456789", digits) != std::string::npos)
+            return false;
+        try {
+            size_t consumed = 0;
+            number = std::stoi(value, &consumed);
+            return consumed == value.size();
+        } catch(const std::exception&) {
+            return false;
+        }
+    };
+    const size_t colon = text.find(':');
+    if(colon != std::string::npos) {
+        if(text.find(':', colon + 1) != std::string::npos) return false;
+        output.type = OverlapMatrixType::HorizontalIndexing;
+        const std::string first = text.substr(0, colon);
+        const std::string last = text.substr(colon + 1);
+        output.anyFirst = first == "*";
+        output.anyLast = last == "*";
+        output.hasFirst = !first.empty() && !output.anyFirst;
+        output.hasLast = !last.empty() && !output.anyLast;
+        if(output.anyFirst && output.anyLast) return true;
+        if(output.anyFirst) return parseNumber(last, output.last);
+        if(output.anyLast) return parseNumber(first, output.first);
+        return parseNumber(first, output.first) && parseNumber(last, output.last);
+    }
+    if(text.empty()) return false;
+    const auto validRow = [](const std::string& row) {
+        return row == "?" || row == "*" || row.find_first_not_of("._xabcdlr") == std::string::npos;
+    };
+    if(text.find(',') == std::string::npos) {
+        if(!validRow(text)) return false;
+        output.type = OverlapMatrixType::Rows;
+        output.rows.push_back(text);
+        return true;
+    }
+    output.type = OverlapMatrixType::Rows;
+    size_t start = 0;
+    do {
+        const size_t end = text.find(',', start);
+        std::string row = text.substr(start, end == std::string::npos ? end : end - start);
+        if(!validRow(row)) return false;
+        output.rows.push_back(std::move(row));
+        if(end == std::string::npos) break;
+        start = end + 1;
+    } while(true);
+    return true;
+}
+
 Pattern::Pattern(IDCtype idc, std::vector<IDS*> pids, size_t preferSplitPoint, int* overlayRange,
-    std::vector<std::string> overlayType, int optionalInt, std::vector<HVOriginRange> hvOriginRanges) {
+    std::vector<std::string> overlayType, int optionalInt, std::vector<HVOriginRange> hvOriginRanges,
+    int overlayRangeFlags) {
     _type = IDS_PATTERN;
     _hvOriginRanges = std::move(hvOriginRanges);
     _idc = idc, _optionalInt = optionalInt;
@@ -331,44 +418,84 @@ Pattern::Pattern(IDCtype idc, std::vector<IDS*> pids, size_t preferSplitPoint, i
         _pids.push_back(pids[i]->Clone());
     if(_idc == IDC_HORIZONAL_ARRANGE || _idc == IDC_VERTICAL_ARRANGE) _preferSplitPoint = preferSplitPoint;
     if(_idc == IDC_OVERLAY) {
-        if(overlayRange != nullptr) _overlayRange[0] = overlayRange[0], _overlayRange[1] = overlayRange[1];
-        _overlayType = overlayType;
+        if((overlayRangeFlags & 1) || (overlayRange != nullptr && (overlayRange[0] != 0 || overlayRange[1] != 0))) {
+            OverlapMatrix range;
+            range.type = OverlapMatrixType::HorizontalIndexing;
+            if(overlayRange != nullptr) range.first = overlayRange[0], range.last = overlayRange[1];
+            range.hasFirst = range.first != 0 || (overlayRangeFlags & 2);
+            range.hasLast = range.last != 0 || (overlayRangeFlags & 4);
+            range.anyFirst = (overlayRangeFlags & 8) != 0;
+            range.anyLast = (overlayRangeFlags & 16) != 0;
+            _overlapMatrices.push_back(std::move(range));
+        }
+        std::string remaining;
+        for(size_t index = 0; index < overlayType.size(); index++) {
+            if(index != 0) remaining += ",";
+            remaining += overlayType[index];
+        }
+        if(!remaining.empty()) {
+            const size_t separator = remaining.find('|');
+            if(separator != std::string::npos && _overlapMatrices.empty()) {
+                OverlapMatrix forward;
+                if(!ParseOverlapMatrix(remaining.substr(0, separator), forward))
+                    throw std::invalid_argument("invalid overlay matrix");
+                _overlapMatrices.push_back(std::move(forward));
+                remaining.erase(0, separator + 1);
+            }
+            OverlapMatrix matrix;
+            if(!ParseOverlapMatrix(remaining, matrix)) throw std::invalid_argument("invalid overlay matrix");
+            _overlapMatrices.push_back(std::move(matrix));
+        }
     }
+}
+
+Pattern::Pattern(IDCtype idc, std::vector<IDS*> pids, std::vector<OverlapMatrix> overlapMatrices,
+    size_t preferSplitPoint, int optionalInt, std::vector<HVOriginRange> hvOriginRanges):
+    Pattern(idc, std::move(pids), preferSplitPoint, nullptr, {}, optionalInt, std::move(hvOriginRanges)) {
+    if(overlapMatrices.size() > 2 || (idc != IDC_OVERLAY && !overlapMatrices.empty()))
+        throw std::invalid_argument("invalid overlap matrix count");
+    if(overlapMatrices.size() == 2 && (overlapMatrices[0].wildcard == OverlapWildcard::AnyModifier ||
+        overlapMatrices[1].wildcard == OverlapWildcard::AnyModifier))
+        throw std::invalid_argument("*** must be the entire overlay modifier");
+    for(const OverlapMatrix& matrix: overlapMatrices) {
+        OverlapMatrix validated;
+        if(!ParseOverlapMatrix(matrix.toString(), validated) || !(matrix == validated))
+            throw std::invalid_argument("invalid overlap matrix");
+    }
+    _overlapMatrices = std::move(overlapMatrices);
 }
 
 Pattern::Pattern(const Pattern& pattern) {
     _type = IDS_PATTERN;
+    _alternativeDefinition = pattern._alternativeDefinition;
     _idc = pattern._idc, _optionalInt = pattern._optionalInt;
     _hvOriginRanges = pattern._hvOriginRanges;
     _preferSplitPoint = pattern._preferSplitPoint;
-    _overlayType      = pattern._overlayType;
+    _overlapMatrices = pattern._overlapMatrices;
     for(const auto& i: pattern._pids)
         _pids.push_back(i->Clone());
-    _overlayRange[0] = pattern._overlayRange[0], _overlayRange[1] = pattern._overlayRange[1];
 }
 
 Pattern::Pattern(Pattern&& pattern) noexcept:
     _idc(pattern._idc),
     _pids(std::move(pattern._pids)),
     _preferSplitPoint(pattern._preferSplitPoint),
-    _overlayType(std::move(pattern._overlayType)),
+    _overlapMatrices(std::move(pattern._overlapMatrices)),
     _optionalInt(pattern._optionalInt),
     _hvOriginRanges(std::move(pattern._hvOriginRanges)) {
-    _overlayRange[0] = pattern._overlayRange[0];
-    _overlayRange[1] = pattern._overlayRange[1];
+    _alternativeDefinition = pattern._alternativeDefinition;
 }
 
 Pattern& Pattern::operator=(const Pattern& pattern) {
     if(this == &pattern) return *this;
     _pids.clear();
     _type             = IDS_PATTERN;
+    _alternativeDefinition = pattern._alternativeDefinition;
     _idc              = pattern._idc;
     _optionalInt      = pattern._optionalInt;
     _hvOriginRanges   = pattern._hvOriginRanges;
     _preferSplitPoint = pattern._preferSplitPoint;
-    _overlayType      = pattern._overlayType;
-    _overlayRange[0]  = pattern._overlayRange[0];
-    _overlayRange[1]  = pattern._overlayRange[1];
+    _overlapMatrices = pattern._overlapMatrices;
     for(const auto& i: pattern._pids)
         _pids.push_back(i->Clone());
     return *this;
@@ -377,12 +504,11 @@ Pattern& Pattern::operator=(const Pattern& pattern) {
 Pattern& Pattern::operator=(Pattern&& pattern) noexcept {
     if(this == &pattern) return *this;
     _type             = pattern._type;
+    _alternativeDefinition = pattern._alternativeDefinition;
     _idc              = pattern._idc;
     _pids             = std::move(pattern._pids);
     _preferSplitPoint = pattern._preferSplitPoint;
-    _overlayRange[0]  = pattern._overlayRange[0];
-    _overlayRange[1]  = pattern._overlayRange[1];
-    _overlayType      = std::move(pattern._overlayType);
+    _overlapMatrices = std::move(pattern._overlapMatrices);
     _optionalInt      = pattern._optionalInt;
     _hvOriginRanges   = std::move(pattern._hvOriginRanges);
     return *this;
@@ -397,17 +523,11 @@ IDS* Pattern::DeepCopy() const {
 
 std::string Pattern::toString() const {
     std::string out(IDCchar[_idc]);
-    if(_idc == IDC_OVERLAY && !(_overlayRange[0] == 0 && _overlayRange[1] == 0 && _overlayType.empty())) {
+    if(_idc == IDC_OVERLAY && !_overlapMatrices.empty()) {
         out += "[";
-        if(!(_overlayRange[0] == 0 && _overlayRange[1] == 0)) {
-            if(_overlayRange[0] != 0) out += std::to_string(_overlayRange[0]);
-            out += ":";
-            if(_overlayRange[1] != 0) out += std::to_string(_overlayRange[1]);
-        }
-        if((_overlayRange[0] != 0 || _overlayRange[0] != 0) && !_overlayType.empty()) out += "|";
-        for(size_t i = 0; i < _overlayType.size(); i++) {
-            out += _overlayType[i];
-            if(i != _overlayType.size() - 1) out += ",";
+        for(size_t index = 0; index < _overlapMatrices.size(); index++) {
+            if(index != 0) out += "|";
+            out += _overlapMatrices[index].toString();
         }
         out += "]";
     }
@@ -422,7 +542,8 @@ std::string Pattern::toString() const {
         out += "]";
     }
     if(isArrange) out += "(";
-    if(_idc != IDC_OVERLAY && _optionalInt != 0) out += "[" + std::to_string(_optionalInt) + "]";
+    if(_idc != IDC_OVERLAY && _optionalInt != 0)
+        out += _optionalInt == IDS_ANY_SURROUND_POSITION ? "[*]" : "[" + std::to_string(_optionalInt) + "]";
     for(size_t i = 0; i < _pids.size(); i++) {
         out += _pids[i]->toString();
         if(isArrange && i == _preferSplitPoint) out += "|";
@@ -456,11 +577,32 @@ size_t Pattern::GetPreferSplitPoint() const {
 }
 
 void Pattern::GetOverlayRange(int* output) const {
-    output[0] = _overlayRange[0], output[1] = _overlayRange[1];
+    output[0] = 0, output[1] = 0;
+    if(!_overlapMatrices.empty() && _overlapMatrices[0].type == OverlapMatrixType::HorizontalIndexing)
+        output[0] = _overlapMatrices[0].first, output[1] = _overlapMatrices[0].last;
 }
 
 std::vector<std::string> Pattern::GetOverlayType() const {
-    return _overlayType;
+    if(_overlapMatrices.empty()) return {};
+    if(_overlapMatrices[0].type == OverlapMatrixType::HorizontalIndexing) {
+        if(_overlapMatrices.size() == 1) return {};
+        return {_overlapMatrices[1].toString()};
+    }
+    std::string text = _overlapMatrices[0].toString();
+    if(_overlapMatrices.size() == 2) text += "|" + _overlapMatrices[1].toString();
+    return {std::move(text)};
+}
+
+int Pattern::GetOverlayRangeFlags() const {
+    if(_overlapMatrices.empty() || _overlapMatrices[0].type != OverlapMatrixType::HorizontalIndexing) return 0;
+    const OverlapMatrix& range = _overlapMatrices[0];
+    return 1 | ((range.hasFirst && range.first == 0) ? 2 : 0) |
+        ((range.hasLast && range.last == 0) ? 4 : 0) |
+        (range.anyFirst ? 8 : 0) | (range.anyLast ? 16 : 0);
+}
+
+const std::vector<OverlapMatrix>& Pattern::GetOverlapMatrices() const {
+    return _overlapMatrices;
 }
 
 int Pattern::GetOptionalInt() const {
@@ -495,8 +637,7 @@ bool Pattern::operator==(const Pattern& pattern) {
             return false;
     }
     if(_idc == IDC_OVERLAY)
-        return _overlayRange[0] == pattern._overlayRange[0] && _overlayRange[1] == pattern._overlayRange[1] &&
-            _overlayType == pattern._overlayType;
+        return _overlapMatrices == pattern._overlapMatrices;
     else {
         if(_optionalInt != pattern._optionalInt) return false;
         if((_idc == IDC_HORIZONAL_ARRANGE || _idc == IDC_VERTICAL_ARRANGE) &&
@@ -1095,6 +1236,10 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
             continue;
         // Stroke
         else if(strokeMode) {
+            if(strokeCross && (idsU32[i] < U'0' || idsU32[i] > U'9')) {
+                SetIDSParseError(parseError, idsU32, i, "expected a digit after stroke cross marker");
+                return nullptr;
+            }
             if(idsU32[i] == U'(') {
                 // 笔画串内部的括号只用于分组；Stroke 结构本身不保留该层次。
                 if(strokeDepth++ == 0) pushToken("(", i);
@@ -1104,6 +1249,10 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                     return nullptr;
                 }
                 if(--strokeDepth == 0) {
+                    if(strokeNeg) {
+                        SetIDSParseError(parseError, idsU32, i, "reversed stroke marker has no following stroke");
+                        return nullptr;
+                    }
                     strokeMode = false;
                     pushToken(")", i);
                 }
@@ -1123,13 +1272,22 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                 }
             }
             // Stroke in Ideograph form
-            else if(idsU32[i] == U'-')
+            else if(idsU32[i] == U'-') {
+                if(strokeNeg) {
+                    SetIDSParseError(parseError, idsU32, i, "repeated reversed stroke marker");
+                    return nullptr;
+                }
                 strokeNeg = true;
-            else if(idsU32[i] == U'x')
+            } else if(idsU32[i] == U'x') {
+                if(strokeNeg) {
+                    SetIDSParseError(parseError, idsU32, i, "reversed stroke marker must precede a stroke");
+                    return nullptr;
+                }
                 strokeCross = true, strBuffer = U"x";
-            else if(strokeCross && std::isdigit(idsU32[i])) {
+            }
+            else if(strokeCross && idsU32[i] >= U'0' && idsU32[i] <= U'9') {
                 strBuffer += idsU32[i];
-                if(!std::isdigit(idsU32[i + 1])) {
+                if(i + 1 == idsU32.size() || idsU32[i + 1] < U'0' || idsU32[i + 1] > U'9') {
                     pushToken(utf8::utf32to8(strBuffer), i);
                     strBuffer = U"", strokeCross = false;
                 }
@@ -1202,6 +1360,7 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
             std::vector<Stroke_Data>      strokeVec      = {};
             std::vector<size_t>           strokeBVec     = {};
             std::vector<Stroke_CrossData> strokeXVec     = {};
+            std::vector<size_t>           crossTokenIndexes;
             bool                          strokeEnclosed = false;
 
             RETURN_NULLPTR_IF_STACK_IS_EMPTY(stack, i);
@@ -1228,36 +1387,91 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                 pids.push_back(std::move(temp));
             }
 
-            for(auto& j: pids) {
+            // 兼容现有抽象纯大写字母链（如 #(ABC)），其笔画数按一个整体计算。
+            const bool abstractLetterChain = pids.size() > 1 && std::all_of(pids.begin(), pids.end(), [](const IDSOwner& part) {
+                const std::string token = static_cast<_ParsingToken*>(part.get())->GetToken();
+                return token.size() == 1 && token[0] >= 'A' && token[0] <= 'Z';
+            });
+            bool lastStrokeModified = false;
+            bool lastWasBreak = false;
+            auto strokeError = [&](size_t index, const std::string& message) {
+                SetIDSParseError(parseError, idsU32, tokenPositions[i + 2 + index], message);
+            };
+            for(size_t index = 0; index < pids.size(); index++) {
+                auto& j = pids[index];
                 jToken = ((_ParsingToken*)j.get())->GetToken();
                 if(jToken.empty()) {
-                    SetIDSParseError(parseError, idsU32, tokenPositions[i], "empty stroke token");
+                    strokeError(index, "empty stroke token");
                     return IDSOwner();
                 }
                 if(jToken[0] == 'x') {
-                    if(strokeVec.empty()) {
-                        SetIDSParseError(parseError, idsU32, tokenPositions[i], "cross marker has no preceding stroke");
+                    if(strokeVec.empty() || lastStrokeModified) {
+                        strokeError(index, "cross marker has no unmodified preceding stroke");
                         return IDSOwner();
                     }
                     try {
-                        strokeXVec.push_back((Stroke_CrossData){strokeVec.size() - 1, std::stoul(jToken.substr(1))});
+                        size_t consumed = 0;
+                        const size_t target = std::stoul(jToken.substr(1), &consumed);
+                        if(consumed != jToken.size() - 1) throw std::invalid_argument("invalid cross marker");
+                        strokeXVec.push_back((Stroke_CrossData){strokeVec.size() - 1, target});
+                        crossTokenIndexes.push_back(index);
                     } catch(const std::exception&) {
-                        SetIDSParseError(parseError, idsU32, tokenPositions[i], "invalid stroke cross marker");
+                        strokeError(index, "invalid stroke cross marker");
                         return IDSOwner();
                     }
+                    lastStrokeModified = true;
+                    lastWasBreak = false;
                 } else if(jToken == "b") {
-                    if(strokeVec.empty()) {
-                        SetIDSParseError(parseError, idsU32, tokenPositions[i], "break marker has no preceding stroke");
+                    if(strokeVec.empty() || lastStrokeModified || index + 1 == pids.size()) {
+                        strokeError(index, "break marker requires a preceding and following stroke");
                         return IDSOwner();
                     }
                     strokeBVec.push_back(strokeVec.size() - 1);
-                } else if(jToken == "z")
+                    lastStrokeModified = true;
+                    lastWasBreak = true;
+                } else if(jToken == "z") {
+                    if(strokeVec.empty() || index + 1 != pids.size() || lastWasBreak) {
+                        strokeError(index, "enclosure marker must follow the final stroke");
+                        return IDSOwner();
+                    }
                     strokeEnclosed = true;
-                else if(jToken[0] == '-')
-                    strokeVec.push_back((Stroke_Data){true, jToken.substr(1)});
-                else
-                    strokeVec.push_back((Stroke_Data){false, jToken});
+                } else {
+                    const bool negative = jToken[0] == '-';
+                    const std::string strokeName = negative ? jToken.substr(1) : jToken;
+                    bool valid = false;
+                    if(abstractLetterChain || strokeName == "H" || strokeName == "Hg" || strokeName == "S" || strokeName == "Sg" ||
+                        strokeName == "P" || strokeName == "Pg" || strokeName == "N" || strokeName == "Ng" ||
+                        strokeName == "D" || strokeName == "T" || strokeName == "J" || strokeName == "Z" ||
+                        strokeName == "Wg" || strokeName == "Qa" || strokeName == "Qb" || strokeName == "Qc" ||
+                        strokeName == "Qd")
+                        valid = true;
+                    else if((strokeName == "Hw" || strokeName == "Hwg") && !strokeVec.empty() &&
+                        (strokeVec.back().stroke == "S" || strokeVec.back().stroke == "P"))
+                        valid = true;
+                    else {
+                        try {
+                            const std::u32string codepoints = utf8::utf8to32(strokeName);
+                            valid = codepoints.size() == 1 && codepoints.front() > 0x7f;
+                        } catch(const std::exception&) {}
+                    }
+                    if(!valid) {
+                        strokeError(index, "invalid stroke character or letter");
+                        return IDSOwner();
+                    }
+                    strokeVec.push_back((Stroke_Data){negative, strokeName});
+                    lastStrokeModified = false;
+                    lastWasBreak = false;
+                }
             }
+            if(strokeVec.empty()) {
+                SetIDSParseError(parseError, idsU32, tokenPositions[i], "stroke chain requires at least one stroke");
+                return IDSOwner();
+            }
+            for(size_t index = 0; index < strokeXVec.size(); index++)
+                if(strokeXVec[index].cross >= strokeVec.size()) {
+                    strokeError(crossTokenIndexes[index], "stroke cross target is out of range");
+                    return IDSOwner();
+                }
             stack.push(IDSOwner(new Stroke(strokeVec, strokeBVec, strokeXVec, strokeEnclosed)));
         } else if(IDCchar2type(tokens[i]) == IDC_HORIZONAL_ARRANGE || IDCchar2type(tokens[i]) == IDC_VERTICAL_ARRANGE) {
             RETURN_NULLPTR_IF_STACK_IS_EMPTY(stack, i);
@@ -1329,9 +1543,7 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                 arrangeOptionalInt, std::move(hvOriginRanges))));
         } else if(IDCchar2type(tokens[i]) != IDC_UNKNOWN) {
             int                      ocType = 0;
-            std::string              optional;
-            std::vector<std::string> splitTemp, overlayType;
-            int                      overlayRange[2] = {0, 0};
+            std::vector<OverlapMatrix> overlapMatrices;
             RETURN_NULLPTR_IF_STACK_IS_EMPTY(stack, i);
             IDS* top = stack.top().get();
             if(top->GetType() == IDS_PARSINGTOKEN && ((_ParsingToken*)top)->GetToken()[0] == '[') {
@@ -1339,29 +1551,25 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                 stack.pop();
                 // Overlay
                 if(IDCchar2type(tokens[i]) == IDC_OVERLAY) {
-                    optional = ((_ParsingToken*)temp.get())->GetToken();
-                    // Optional String parser
-                    splitTemp = StringSplit(optional.substr(1, optional.length() - 2), U'|');
-                    for(auto j: splitTemp) {
-                        // Overlay Range
-                        overlayRange[0] = 0, overlayRange[1] = 0;
-                        if(j.find(':') != std::string::npos) {
-                            overlayType = StringSplit(j, U':');
-                            if(overlayType[0] != "") {
-                                try {
-                                    overlayRange[0] = std::stoi(overlayType[0]);
-                                } catch(const std::exception& e) {}
-                            }
-                            if(overlayType[1] != "") {
-                                try {
-                                    overlayRange[1] = std::stoi(overlayType[1]);
-                                } catch(const std::exception& e) {}
-                            }
-                            overlayType = {};
-                        }
-                        // Overlay Type
-                        else
-                            overlayType = StringSplit(j, U',');
+                    const std::string optional = ((_ParsingToken*)temp.get())->GetToken();
+                    const std::string modifier = optional.substr(1, optional.length() - 2);
+                    const size_t separator = modifier.find('|');
+                    OverlapMatrix forward;
+                    bool valid = ParseOverlapMatrix(modifier.substr(0, separator), forward);
+                    if(valid) overlapMatrices.push_back(std::move(forward));
+                    if(separator != std::string::npos) {
+                        OverlapMatrix reverse;
+                        valid = valid && modifier.find('|', separator + 1) == std::string::npos &&
+                            ParseOverlapMatrix(modifier.substr(separator + 1), reverse);
+                        if(valid) overlapMatrices.push_back(std::move(reverse));
+                    }
+                    if(valid && overlapMatrices.size() == 2 &&
+                        (overlapMatrices[0].wildcard == OverlapWildcard::AnyModifier ||
+                            overlapMatrices[1].wildcard == OverlapWildcard::AnyModifier))
+                        valid = false;
+                    if(!valid) {
+                        SetIDSParseError(parseError, idsU32, tokenPositions[i + 1], "invalid overlay modifier");
+                        return IDSOwner();
                     }
                 }
                 // Other IDC
@@ -1369,8 +1577,20 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                     jToken = ((_ParsingToken*)temp.get())->GetToken();
                     if(jToken.substr(1, jToken.length() - 2) != "") {
                         try {
-                            ocType = std::stoi(jToken.substr(1, jToken.length() - 2));
-                        } catch(const std::exception& e) {}
+                            const std::string value = jToken.substr(1, jToken.length() - 2);
+                            const IDCtype idc = IDCchar2type(tokens[i]);
+                            if(value == "*" && idc >= IDC_SURROUND_FULL && idc <= IDC_SURROUND_LOWERRIGHT)
+                                ocType = IDS_ANY_SURROUND_POSITION;
+                            else {
+                                size_t consumed = 0;
+                                ocType = std::stoi(value, &consumed);
+                                if(consumed != value.size() || ocType < 0)
+                                    throw std::invalid_argument("invalid index");
+                            }
+                        } catch(const std::exception&) {
+                            SetIDSParseError(parseError, idsU32, tokenPositions[i + 1], "invalid IDC index");
+                            return IDSOwner();
+                        }
                     }
                 }
                 temp.reset();
@@ -1400,7 +1620,11 @@ IDSOwner ParseIDSOwned(std::string ids, IDSParseError* parseError) {
                     pids.push_back(std::move(temp));
             }
             std::vector<IDS*> pidsRaw = BorrowIDS(pids);
-            stack.push(IDSOwner(new Pattern(IDCchar2type(tokens[i]), pidsRaw, -1, overlayRange, overlayType, ocType)));
+            const IDCtype idc = IDCchar2type(tokens[i]);
+            if(idc == IDC_OVERLAY)
+                stack.push(IDSOwner(new Pattern(idc, pidsRaw, std::move(overlapMatrices))));
+            else
+                stack.push(IDSOwner(new Pattern(idc, pidsRaw, -1, nullptr, {}, ocType)));
         }
         // non IDC
         else if(tokens[i].compare(0, 8, "<stroke=") == 0 || tokens[i].compare(0, 9, "<residue=") == 0) {

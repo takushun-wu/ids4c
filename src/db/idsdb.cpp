@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <iostream>
 #include <limits>
@@ -12,6 +13,47 @@
 #include <utility>
 
 static bool IsCodepointInUnicodeBlock(uint32_t codepoint, IDSunicodeBlock block);
+
+namespace {
+bool HasHVOriginRange(IDS* ids) {
+    if(!IsPattern(ids)) return false;
+    Pattern* pattern = AsPattern(ids);
+    if(!pattern->GetHVOriginRanges().empty()) return true;
+    for(const auto& child: pattern->GetpIDSRef())
+        if(HasHVOriginRange(child.get())) return true;
+    return false;
+}
+
+class ScopedQueryProfileTimer {
+public:
+    explicit ScopedQueryProfileTimer(uint64_t* total): total_(total) {
+        if(total_ != nullptr) started_ = std::chrono::steady_clock::now();
+    }
+    ~ScopedQueryProfileTimer() { Stop(); }
+    void Stop() {
+        if(total_ != nullptr) {
+            *total_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started_).count());
+            total_ = nullptr;
+        }
+    }
+
+private:
+    uint64_t* total_;
+    std::chrono::steady_clock::time_point started_;
+};
+} // namespace
+
+const char* IDSOverlapMatchModeName(IDSOverlapMatchMode mode) {
+    return mode == IDS_OVERLAP_MATCH_CONSTRAINED ? "constrained" : "ignore";
+}
+
+bool ParseIDSOverlapMatchMode(const std::string& value, IDSOverlapMatchMode& mode) {
+    if(value == "ignore") mode = IDS_OVERLAP_MATCH_IGNORE;
+    else if(value == "constrained") mode = IDS_OVERLAP_MATCH_CONSTRAINED;
+    else return false;
+    return true;
+}
 
 const char* IDSImportStageName(IDSimportStage stage) {
     switch(stage) {
@@ -200,13 +242,12 @@ static void AppendEquivalentQuerySemanticKey(IDS* ids, std::string& key) {
         const IDCtype  idc     = pattern->GetIDC();
         key                   += "pattern;" + std::to_string(static_cast<int>(idc)) + ";";
         if(idc == IDC_OVERLAY) {
-            int range[2] = {0, 0};
-            pattern->GetOverlayRange(range);
-            key += "range;" + std::to_string(range[0]) + ";" + std::to_string(range[1]) + ";";
-            const std::vector<std::string> overlayType = pattern->GetOverlayType();
-            key                                       += "overlay;" + std::to_string(overlayType.size()) + ";";
-            for(const std::string& value: overlayType)
-                AppendEquivalentQuerySemanticText(key, value);
+            const auto& matrices = pattern->GetOverlapMatrices();
+            key += "matrices;" + std::to_string(matrices.size()) + ";";
+            for(const OverlapMatrix& matrix: matrices) {
+                key += std::to_string(static_cast<int>(matrix.type)) + ";";
+                AppendEquivalentQuerySemanticText(key, matrix.toString());
+            }
         } else {
             key += "optional;" + std::to_string(pattern->GetOptionalInt()) + ";";
             // 当前匹配器对排列结构只按子节点序列匹配，不使用 preferSplitPoint。
@@ -1271,7 +1312,7 @@ IDSOwnerList IDSdatabase::ExpandSameIDSQuery(IDS* ids, size_t maximum) {
             pattern->GetOverlayRange(overlayRange);
             append(result,
                 IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), overlayRange,
-                    pattern->GetOverlayType(), pattern->GetOptionalInt())));
+                    pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags())));
             if(result.size() >= maximum) break;
         }
         return result;
@@ -1304,7 +1345,7 @@ IDSOwner CloneStrokeNeutralNode(IDS* value) {
     // HV origin ranges are intentionally omitted: they describe the source
     // tree and are not valid after a component has been replaced.
     return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), overlayRange,
-        pattern->GetOverlayType(), pattern->GetOptionalInt()));
+        pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
 }
 
 IDSOwner CloneStrokeNeutralKeyNode(IDS* value) {
@@ -1328,7 +1369,7 @@ IDSOwner CloneStrokeNeutralKeyNode(IDS* value) {
     int overlayRange[2] = {0, 0};
     pattern->GetOverlayRange(overlayRange);
     return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), overlayRange,
-        pattern->GetOverlayType(), pattern->GetOptionalInt()));
+        pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
 }
 
 std::string StrokeNeutralExpression(IDS* value) {
@@ -1351,7 +1392,7 @@ IDSOwner MakeStrokeNeutralPattern(Pattern* source, const IDSOwnerList& children)
     int overlayRange[2] = {0, 0};
     source->GetOverlayRange(overlayRange);
     return IDSOwner(new Pattern(source->GetIDC(), childPointers, source->GetPreferSplitPoint(), overlayRange,
-        source->GetOverlayType(), source->GetOptionalInt()));
+        source->GetOverlayType(), source->GetOptionalInt(), {}, source->GetOverlayRangeFlags()));
 }
 
 IDSOwnerList ComposeStrokeNeutralNode(
@@ -2239,7 +2280,8 @@ IDSOwnerList IDSdatabase::HVExtractAlternativesInternal(
                 originRanges));
         } else
             alternative.reset(new Pattern(pattern->GetIDC(), children, SIZE_MAX, overlayRange,
-                pattern->GetOverlayType(), pattern->GetOptionalInt(), pattern->GetHVOriginRanges()));
+                pattern->GetOverlayType(), pattern->GetOptionalInt(), pattern->GetHVOriginRanges(),
+                pattern->GetOverlayRangeFlags()));
         AppendUniqueOwned(out, std::move(alternative), maximum, truncated);
     }
     return out;
@@ -2363,14 +2405,6 @@ bool IDSdatabase::MatchIWDSUnificationPattern(IDS* candidate, IDS* pattern, bool
 
     if(IsArrangeIDC(patternTemplate->GetIDC()) &&
         candidatePattern->GetPreferSplitPoint() != patternTemplate->GetPreferSplitPoint())
-        return false;
-
-    int candidateRange[2] = {0, 0};
-    int patternRange[2]   = {0, 0};
-    candidatePattern->GetOverlayRange(candidateRange);
-    patternTemplate->GetOverlayRange(patternRange);
-    if(candidateRange[0] != patternRange[0] || candidateRange[1] != patternRange[1] ||
-        candidatePattern->GetOverlayType() != patternTemplate->GetOverlayType())
         return false;
 
     for(size_t index = 0; index < PatternChildCount(patternTemplate); index++)
@@ -2619,20 +2653,26 @@ void IDSdatabase::ApplyResultFilter(std::vector<Ideograph>& result, const IDSque
                              suffix.find_first_of(ASCII_LOWERCASE) != std::string::npos;
                      }),
         result.end());
-    // 严格 locale 筛选只接受本次查询实际命中的无后缀基字形。
-    // 这样即使设置了回退顺序，也不会从另一个 IDS 表达式借来 locale 变体。
+    // 先记录本次确实命中的无后缀字形，防止用未命中的地区 IDS 代替它。
     std::unordered_set<Ideograph, Ideograph_Hash> matchedBases;
     for(const Ideograph& ideograph: result)
         if(ideograph.GetSuffix().empty())
             matchedBases.insert(LocaleIdentity(ideograph, keepIVS));
 
+    const std::vector<std::string>& localeOrder = options.filter.localeSuffixFallbackOrder;
+    // 显式配置回退时，只有数据库完全没有无后缀定义才允许回退；若定义存在但未匹配，仍须过滤地区变体。
+    const auto hasUnlocalizedDefinition = [this, keepIVS](const Ideograph& ideograph) {
+        const Ideograph base = ideograph.inUnicode()
+            ? Ideograph(ideograph.GetIdeo(), keepIVS ? ideograph.GetVS() : 0)
+            : Ideograph(ideograph.GetAbstractName());
+        return _idsDB.find(base) != _idsDB.end();
+    };
     const auto hasMatchedBase = [&matchedBases, keepIVS](const Ideograph& ideograph) {
         const Ideograph identity = LocaleIdentity(ideograph, keepIVS);
         if(matchedBases.find(identity) != matchedBases.end()) return true;
         // keep-ivs 下，带 VS 的字形本身就是独立身份，即使没有无后缀记录也可保留。
         return keepIVS && ideograph.GetVS() != 0;
     };
-    const std::vector<std::string>& localeOrder = options.filter.localeSuffixFallbackOrder;
     if(!localeOrder.empty()) {
         const auto localeGroups = LocaleSuffixFallbackGroups(localeOrder);
         std::sort(result.begin(), result.end(),
@@ -2654,9 +2694,10 @@ void IDSdatabase::ApplyResultFilter(std::vector<Ideograph>& result, const IDSque
             });
         std::unordered_set<Ideograph, Ideograph_Hash> seen;
         result.erase(std::remove_if(result.begin(), result.end(),
-                         [&seen, &hasMatchedBase, keepIVS](const Ideograph& ideograph) {
+                         [&seen, &hasMatchedBase, &hasUnlocalizedDefinition, keepIVS](
+                             const Ideograph& ideograph) {
                              const Ideograph identity = LocaleIdentity(ideograph, keepIVS);
-                             if(!hasMatchedBase(ideograph)) return true;
+                             if(!hasMatchedBase(ideograph) && hasUnlocalizedDefinition(ideograph)) return true;
                              return !seen.insert(identity).second;
                          }),
             result.end());
@@ -2680,8 +2721,37 @@ void IDSdatabase::ApplyResultFilter(std::vector<Ideograph>& result, const IDSque
         result.end());
 }
 
-bool IDSdatabase::IDSarrayMatch(
-    const std::vector<IDS*>& s, const std::vector<IDS*>& p, IDCtype arrangement, size_t sIdx, size_t pIdx) {
+struct SurroundEqualSyntax {
+    IDCtype arrange;
+    IDCtype surround;
+    bool surroundedOnFirst;
+};
+
+const SurroundEqualSyntax SurroundEqualTable[] = {
+    {IDC_VERTICAL_ARRANGE, IDC_SURROUND_ABOVE, false},
+    {IDC_VERTICAL_ARRANGE, IDC_SURROUND_BELOW, true},
+    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_LEFT, false},
+    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_RIGHT, true},
+    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_UPPERLEFT, false},
+    {IDC_VERTICAL_ARRANGE, IDC_SURROUND_UPPERLEFT, false},
+    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_UPPERRIGHT, true},
+    {IDC_VERTICAL_ARRANGE, IDC_SURROUND_UPPERRIGHT, false},
+    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_LOWERLEFT, false},
+    {IDC_VERTICAL_ARRANGE, IDC_SURROUND_LOWERLEFT, true},
+    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_LOWERRIGHT, true},
+    {IDC_VERTICAL_ARRANGE, IDC_SURROUND_LOWERRIGHT, true},
+};
+
+// 返回从包围部件中剥离的外缘方向；0 表示该包围符与横/竖方向不相容。
+static int ReassociatedEnclosureEdge(IDCtype surround, IDCtype arrange) {
+    for(const SurroundEqualSyntax& syntax: SurroundEqualTable)
+        if(syntax.arrange == arrange && syntax.surround == surround)
+            return syntax.surroundedOnFirst ? -1 : 1;
+    return 0;
+}
+
+bool IDSdatabase::IDSarrayMatch(const std::vector<IDS*>& s, const std::vector<IDS*>& p, IDCtype arrangement,
+    size_t sIdx, size_t pIdx, const std::vector<HVOriginRange>* sourceOrigins) {
     VariableBindingScope bindings(_variableBindings);
     if(sIdx == s.size() && pIdx == p.size()) return bindings.Finish(true);
     if(sIdx == s.size() || pIdx == p.size()) return false;
@@ -2689,7 +2759,7 @@ bool IDSdatabase::IDSarrayMatch(
     IDS* currentPatternIDS = p[pIdx];
     if(IsWildcard(currentPatternIDS)) {
         for(size_t i = 1; i < s.size() - sIdx + 1; i++)
-            if(IDSarrayMatch(s, p, arrangement, sIdx + i, pIdx + 1)) return bindings.Finish(true);
+            if(IDSarrayMatch(s, p, arrangement, sIdx + i, pIdx + 1, sourceOrigins)) return bindings.Finish(true);
         return false;
     }
 
@@ -2707,36 +2777,38 @@ bool IDSdatabase::IDSarrayMatch(
             _variableBindings = bindings.GetSaved();
             const std::vector<IDS*> range(s.begin() + sIdx, s.begin() + sIdx + width);
             if(MatchVariableRange(range, variable, arrangement) &&
-                IDSarrayMatch(s, p, arrangement, sIdx + width, pIdx + 1))
+                IDSarrayMatch(s, p, arrangement, sIdx + width, pIdx + 1, sourceOrigins))
                 return bindings.Finish(true);
         }
         return false;
     }
 
+    if(IsPattern(currentPatternIDS) &&
+        ReassociatedEnclosureEdge(AsPattern(currentPatternIDS)->GetIDC(), arrangement) != 0) {
+        const size_t minimumRemaining = p.size() - pIdx - 1;
+        const size_t available = s.size() - sIdx;
+        if(available >= minimumRemaining + 2) {
+            const size_t widthLimit = available - minimumRemaining;
+            for(size_t width = 2; width <= widthLimit; width++) {
+                const bool crossesOrigin = sourceOrigins != nullptr &&
+                    std::any_of(sourceOrigins->begin(), sourceOrigins->end(), [sIdx, width](const HVOriginRange& origin) {
+                        return origin.first < sIdx + width && origin.last > sIdx;
+                    });
+                if(crossesOrigin) continue;
+                std::vector<IDS*> groupedChildren(s.begin() + sIdx, s.begin() + sIdx + width);
+                Pattern grouped(arrangement, groupedChildren);
+                _variableBindings = bindings.GetSaved();
+                if(IDSmatch(&grouped, currentPatternIDS) &&
+                    IDSarrayMatch(s, p, arrangement, sIdx + width, pIdx + 1, sourceOrigins))
+                    return bindings.Finish(true);
+            }
+        }
+        _variableBindings = bindings.GetSaved();
+    }
+
     if(!IDSmatch(s[sIdx], currentPatternIDS)) return false;
-    return bindings.Finish(IDSarrayMatch(s, p, arrangement, sIdx + 1, pIdx + 1));
+    return bindings.Finish(IDSarrayMatch(s, p, arrangement, sIdx + 1, pIdx + 1, sourceOrigins));
 }
-typedef struct {
-    IDCtype arrange;
-    IDCtype surround;
-    bool    surroundedOnFirst;
-} SurroundEqualSyntax;
-
-const SurroundEqualSyntax SurroundEqualTable[] = {
-    { IDC_VERTICAL_ARRANGE,      IDC_SURROUND_ABOVE, false},
-    { IDC_VERTICAL_ARRANGE,      IDC_SURROUND_BELOW,  true},
-    {IDC_HORIZONAL_ARRANGE,       IDC_SURROUND_LEFT, false},
-    {IDC_HORIZONAL_ARRANGE,      IDC_SURROUND_RIGHT,  true},
-    {IDC_HORIZONAL_ARRANGE,  IDC_SURROUND_UPPERLEFT, false},
-    { IDC_VERTICAL_ARRANGE,  IDC_SURROUND_UPPERLEFT, false},
-    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_UPPERRIGHT,  true},
-    { IDC_VERTICAL_ARRANGE, IDC_SURROUND_UPPERRIGHT, false},
-    {IDC_HORIZONAL_ARRANGE,  IDC_SURROUND_LOWERLEFT, false},
-    { IDC_VERTICAL_ARRANGE,  IDC_SURROUND_LOWERLEFT,  true},
-    {IDC_HORIZONAL_ARRANGE, IDC_SURROUND_LOWERRIGHT,  true},
-    { IDC_VERTICAL_ARRANGE, IDC_SURROUND_LOWERRIGHT,  true}
-};
-
 bool IDSdatabase::IDSmatch(IDS* idsInDB, IDS* ids, bool surroundEqual) {
     if(idsInDB == nullptr || ids == nullptr) return false;
     VariableBindingScope bindings(_variableBindings);
@@ -2860,14 +2932,6 @@ bool IDSdatabase::VariableEquivalent(IDS* bound, IDS* candidate) {
         boundPattern->GetPreferSplitPoint() != candidatePattern->GetPreferSplitPoint())
         return false;
 
-    int boundRange[2]     = {0, 0};
-    int candidateRange[2] = {0, 0};
-    boundPattern->GetOverlayRange(boundRange);
-    candidatePattern->GetOverlayRange(candidateRange);
-    if(boundRange[0] != candidateRange[0] || boundRange[1] != candidateRange[1] ||
-        boundPattern->GetOverlayType() != candidatePattern->GetOverlayType())
-        return false;
-
     for(size_t index = 0; index < PatternChildCount(boundPattern); index++)
         if(!VariableEquivalent(PatternChild(boundPattern, index), PatternChild(candidatePattern, index))) return false;
     return true;
@@ -2885,12 +2949,6 @@ bool IDSdatabase::MatchesSameIDS(IDS* idsInDB, Ideograph query, bool ignoreSuffi
 bool IDSdatabase::MatchSearchExpression(IDS* idsInDB, SearchExpression* search) {
     if(search == nullptr) return false;
     if(search->GetMode() == SEARCH_EXPRESSION_EXCEPT) return !MatchExceptTerms(idsInDB, search->GetTerms());
-    if(search->GetTerms().size() == 1 && IsIdeograph(search->GetTerms().front().get()) && IsPattern(idsInDB)) {
-        const Ideograph query = *AsIdeograph(search->GetTerms().front().get());
-        if(HasForeignHVOrigin(AsPattern(idsInDB), query) && !HasMatchingHVOrigin(AsPattern(idsInDB), query))
-            return false;
-    }
-
     const bool matched = search->GetMode() == SEARCH_EXPRESSION_ANY
         ? MatchAnyExpression(idsInDB, search)
         : MatchSearchTermsWithAny(idsInDB, search->GetTerms());
@@ -3384,18 +3442,67 @@ bool IDSdatabase::MatchEnclosingComponentExpansion(Pattern* pidsInDB, Pattern* p
     // 包围部件先按自身 IDS 展开；例如“礼”展开为“⿰礻乚”后可匹配“⿰礻⬚”。
     return IDSmatch(PatternChild(pidsInDB, 0), pids);
 }
+
+static bool MatchOverlapRows(const OverlapMatrix& candidate, const OverlapMatrix& query) {
+    const auto& candidateRows = candidate.rows;
+    const auto& queryRows = query.rows;
+    const size_t queryCount = queryRows.size(), candidateCount = candidateRows.size();
+    std::vector<std::vector<bool>> matched(queryCount + 1, std::vector<bool>(candidateCount + 1, false));
+    matched[queryCount][candidateCount] = true;
+    for(size_t qi = queryCount; qi-- > 0;)
+        for(size_t ci = candidateCount; ci-- > 0;) {
+            const std::string& row = queryRows[qi];
+            if(row == "*")
+                matched[qi][ci] = matched[qi + 1][ci + 1] || matched[qi][ci + 1];
+            else if(row == "?" || row == candidateRows[ci])
+                matched[qi][ci] = matched[qi + 1][ci + 1];
+        }
+    return matched[0][0];
+}
+
+static bool MatchOverlapModifier(const Pattern* candidate, const Pattern* query) {
+    const auto& queryMatrices = query->GetOverlapMatrices();
+    const auto& candidateMatrices = candidate->GetOverlapMatrices();
+    if(queryMatrices.size() == 1 && queryMatrices[0].wildcard == OverlapWildcard::AnyModifier) return true;
+    if(queryMatrices.size() != candidateMatrices.size()) return false;
+    for(size_t index = 0; index < queryMatrices.size(); index++) {
+        const OverlapMatrix& wanted = queryMatrices[index];
+        const OverlapMatrix& actual = candidateMatrices[index];
+        if(wanted.wildcard == OverlapWildcard::AnyMatrix) continue;
+        if(wanted.type == OverlapMatrixType::HorizontalIndexing) {
+            if(actual.type != OverlapMatrixType::HorizontalIndexing) return false;
+            if(!wanted.anyFirst && (wanted.hasFirst != actual.hasFirst ||
+                (wanted.hasFirst && wanted.first != actual.first))) return false;
+            if(!wanted.anyLast && (wanted.hasLast != actual.hasLast ||
+                (wanted.hasLast && wanted.last != actual.last))) return false;
+        } else {
+            if(actual.type == OverlapMatrixType::HorizontalIndexing || !MatchOverlapRows(actual, wanted)) return false;
+        }
+    }
+    return true;
+}
+
 bool IDSdatabase::MatchNormalizedPatterns(Pattern* pidsInDB, Pattern* pids) {
     VariableBindingScope bindings(_variableBindings);
     if(pids->GetIDC() != pidsInDB->GetIDC()) return false;
+    if(pids->GetIDC() != IDC_OVERLAY && pids->GetOptionalInt() != IDS_ANY_SURROUND_POSITION &&
+        pids->GetOptionalInt() != pidsInDB->GetOptionalInt() &&
+        (pids->GetOptionalInt() != 0 || pidsInDB->GetOptionalInt() != 0))
+        return false;
 
     if(IsArrangeIDC(pids->GetIDC()))
-        return bindings.Finish(IDSarrayMatch(BorrowPatternIDS(pidsInDB), BorrowPatternIDS(pids), pids->GetIDC()));
+        return bindings.Finish(IDSarrayMatch(BorrowPatternIDS(pidsInDB), BorrowPatternIDS(pids), pids->GetIDC(), 0, 0,
+            &pidsInDB->GetHVOriginRanges()));
 
     if(pids->GetIDC() == IDC_OVERLAY && PatternChildCount(pids) == PatternChildCount(pidsInDB)) {
+        if(_constrainOverlapForMatch && !MatchOverlapModifier(pidsInDB, pids)) return false;
         if(IDSmatch(PatternChild(pidsInDB, 0), PatternChild(pids, 0)) &&
             IDSmatch(PatternChild(pidsInDB, 1), PatternChild(pids, 1)))
             return bindings.Finish(true);
 
+        if(_constrainOverlapForMatch && !(pids->GetOverlapMatrices().size() == 1 &&
+            pids->GetOverlapMatrices()[0].wildcard == OverlapWildcard::AnyModifier))
+            return false;
         _variableBindings = bindings.GetSaved();
         if(IDSmatch(PatternChild(pidsInDB, 0), PatternChild(pids, 1)) &&
             IDSmatch(PatternChild(pidsInDB, 1), PatternChild(pids, 0)))
@@ -3414,8 +3521,349 @@ bool IDSdatabase::MatchPatternPair(Pattern* pidsInDB, Pattern* pids, bool surrou
     if(MatchEnclosingComponentExpansion(pidsInDB, pids)) return true;
 
     bool matched = MatchNormalizedPatterns(pidsInDB, pids);
+    if(!matched) matched = MatchReassociatedEnclosure(pidsInDB, pids);
+    if(!matched) matched = MatchInternalEnclosureReassociation(pidsInDB, pids);
+    if(!matched && !_strictEnclosureMatchForMatch)
+        matched = MatchApproximateEnclosureLayout(pidsInDB, pids);
     if(!matched) matched = IDSsurroundMatch(pidsInDB, pids);
     return matched;
+}
+
+bool IDSdatabase::MatchReassociatedEnclosure(Pattern* candidate, Pattern* query) {
+    auto tryDirection = [&](Pattern* enclosure, Pattern* arrangement, bool enclosureIsCandidate) {
+        const IDCtype arrangeIDC = arrangement->GetIDC();
+        const int edge = ReassociatedEnclosureEdge(enclosure->GetIDC(), arrangeIDC);
+        if(edge == 0) return false;
+        const bool peelFirst = edge > 0;
+        if(PatternChildCount(arrangement) < 2 || PatternChildCount(enclosure) != 2 ||
+            !enclosure->GetHVOriginRanges().empty() ||
+            (enclosure->GetOptionalInt() != 0 &&
+                (enclosureIsCandidate || enclosure->GetOptionalInt() != IDS_ANY_SURROUND_POSITION)))
+            return false;
+
+        IDS* wrapper = PatternChild(enclosure, 0);
+        IDS* enclosed = PatternChild(enclosure, 1);
+        std::vector<IDS*> expansions;
+        if(IsPattern(wrapper))
+            expansions.push_back(wrapper);
+        else if(IsIdeograph(wrapper))
+            expansions = FindIDS(*AsIdeograph(wrapper));
+
+        for(IDS* expansion: expansions) {
+            if(!IsPattern(expansion)) continue;
+            Pattern* inner = AsPattern(expansion);
+            const size_t count = PatternChildCount(inner);
+            if(HVArrangementType(inner) != arrangeIDC || count < 2) continue;
+
+            for(size_t split = 1; split < count; split++) {
+                const size_t remainFirst = peelFirst ? split : 0;
+                const size_t remainLast = peelFirst ? count : split;
+                const size_t edgeFirst = peelFirst ? 0 : split;
+                const size_t edgeLast = peelFirst ? split : count;
+                std::vector<HVOriginRange> edgeOrigins;
+                std::vector<HVOriginRange> remainderOrigins;
+                bool crossesOrigin = false;
+                // 来源范围不能跨越新的边界；完整落在一侧的范围随子树重定位。
+                for(const HVOriginRange& origin: inner->GetHVOriginRanges()) {
+                    if(origin.first < split && origin.last > split) {
+                        crossesOrigin = true;
+                        break;
+                    }
+                    HVOriginRange rebased = origin;
+                    if(origin.first >= remainFirst && origin.last <= remainLast) {
+                        rebased.first -= remainFirst;
+                        rebased.last -= remainFirst;
+                        remainderOrigins.push_back(std::move(rebased));
+                    } else {
+                        rebased.first = origin.first - edgeFirst + (peelFirst ? 0 : 1);
+                        rebased.last = origin.last - edgeFirst + (peelFirst ? 0 : 1);
+                        edgeOrigins.push_back(std::move(rebased));
+                    }
+                }
+                if(crossesOrigin || (remainLast - remainFirst == 1 && !remainderOrigins.empty())) continue;
+
+                IDSOwner remainderPattern;
+                IDS* remainder = PatternChild(inner, remainFirst);
+                if(remainLast - remainFirst > 1) {
+                    std::vector<IDS*> remainderChildren;
+                    for(size_t index = remainFirst; index < remainLast; index++)
+                        remainderChildren.push_back(PatternChild(inner, index));
+                    const size_t oldSplit = inner->GetPreferSplitPoint();
+                    const size_t newSplit = oldSplit > remainFirst && oldSplit < remainLast
+                        ? oldSplit - remainFirst
+                        : SIZE_MAX;
+                    remainderPattern.reset(new Pattern(arrangeIDC, remainderChildren, newSplit, nullptr, {}, 0,
+                        std::move(remainderOrigins)));
+                    remainder = remainderPattern.get();
+                }
+
+                Pattern narrowed(enclosure->GetIDC(), {remainder, enclosed});
+                std::vector<IDS*> regroupedChildren;
+                if(!peelFirst) regroupedChildren.push_back(&narrowed);
+                for(size_t index = edgeFirst; index < edgeLast; index++)
+                    regroupedChildren.push_back(PatternChild(inner, index));
+                if(peelFirst) regroupedChildren.push_back(&narrowed);
+                Pattern regrouped(arrangeIDC, regroupedChildren, SIZE_MAX, nullptr, {}, 0, std::move(edgeOrigins));
+                if(enclosureIsCandidate ? MatchNormalizedPatterns(&regrouped, arrangement)
+                                        : MatchNormalizedPatterns(arrangement, &regrouped))
+                    return true;
+            }
+        }
+        return false;
+    };
+
+    auto tryPromote = [&](Pattern* arrangement, Pattern* enclosure, bool arrangementIsCandidate) {
+        const IDCtype arrangeIDC = arrangement->GetIDC();
+        const int edge = ReassociatedEnclosureEdge(enclosure->GetIDC(), arrangeIDC);
+        if(edge == 0 || PatternChildCount(arrangement) < 2 || PatternChildCount(enclosure) != 2 ||
+            !enclosure->GetHVOriginRanges().empty() ||
+            (enclosure->GetOptionalInt() != 0 &&
+                (arrangementIsCandidate || enclosure->GetOptionalInt() != IDS_ANY_SURROUND_POSITION)))
+            return false;
+
+        const size_t boundary = edge > 0 ? PatternChildCount(arrangement) - 1 : 0;
+        for(const HVOriginRange& origin: arrangement->GetHVOriginRanges())
+            if(origin.first <= boundary && origin.last > boundary) return false;
+
+        IDS* enclosingChild = PatternChild(arrangement, boundary);
+        std::vector<IDS*> expansions;
+        if(IsPattern(enclosingChild))
+            expansions.push_back(enclosingChild);
+        else if(IsIdeograph(enclosingChild))
+            expansions = FindIDS(*AsIdeograph(enclosingChild));
+
+        for(IDS* expansion: expansions) {
+            if(!IsPattern(expansion)) continue;
+            Pattern* inner = AsPattern(expansion);
+            if(inner->GetIDC() != enclosure->GetIDC() || PatternChildCount(inner) != 2 ||
+                !inner->GetHVOriginRanges().empty() || inner->GetOptionalInt() != 0)
+                continue;
+
+            std::vector<IDS*> wrapperChildren;
+            for(size_t index = 0; index < PatternChildCount(arrangement); index++)
+                wrapperChildren.push_back(index == boundary ? PatternChild(inner, 0) : PatternChild(arrangement, index));
+            Pattern joinedWrapper(arrangeIDC, wrapperChildren, arrangement->GetPreferSplitPoint(), nullptr, {}, 0,
+                arrangement->GetHVOriginRanges());
+            Pattern promoted(enclosure->GetIDC(), {&joinedWrapper, PatternChild(inner, 1)});
+            if(arrangementIsCandidate ? MatchNormalizedPatterns(&promoted, enclosure)
+                                      : MatchNormalizedPatterns(enclosure, &promoted))
+                return true;
+        }
+        return false;
+    };
+
+    VariableBindingScope bindings(_variableBindings);
+    if(tryDirection(candidate, query, true)) return bindings.Finish(true);
+    _variableBindings = bindings.GetSaved();
+    if(tryDirection(query, candidate, false)) return bindings.Finish(true);
+    _variableBindings = bindings.GetSaved();
+    if(tryPromote(candidate, query, true)) return bindings.Finish(true);
+    _variableBindings = bindings.GetSaved();
+    return bindings.Finish(tryPromote(query, candidate, false));
+}
+
+bool IDSdatabase::MatchInternalEnclosureReassociation(Pattern* candidate, Pattern* query) {
+    if(candidate->GetIDC() != query->GetIDC() || PatternChildCount(candidate) != 2 ||
+        PatternChildCount(query) != 2 || candidate->GetOptionalInt() != 0 ||
+        (query->GetOptionalInt() != 0 && query->GetOptionalInt() != IDS_ANY_SURROUND_POSITION))
+        return false;
+
+    const IDCtype surround = candidate->GetIDC();
+    bool compatible = false;
+    for(const SurroundEqualSyntax& syntax: SurroundEqualTable)
+        if(syntax.surround == surround) {
+            compatible = true;
+            break;
+        }
+    if(!compatible) return false;
+
+    auto expansionsFor = [&](IDS* child) {
+        if(IsPattern(child)) return std::vector<IDS*>{child};
+        return IsIdeograph(child) ? FindIDS(*AsIdeograph(child)) : std::vector<IDS*>{};
+    };
+
+    VariableBindingScope bindings(_variableBindings);
+    auto tryMatch = [&](Pattern* transformed, Pattern* target, bool sourceIsCandidate) {
+        _variableBindings = bindings.GetSaved();
+        return sourceIsCandidate ? MatchNormalizedPatterns(transformed, target)
+                                 : MatchNormalizedPatterns(target, transformed);
+    };
+    auto trySource = [&](Pattern* source, Pattern* target, bool sourceIsCandidate) {
+        for(bool leftForm: {true, false}) {
+            IDS* child = PatternChild(source, leftForm ? 0 : 1);
+            for(IDS* expansion: expansionsFor(child)) {
+                if(!IsPattern(expansion)) continue;
+                Pattern* inner = AsPattern(expansion);
+                if(inner->GetIDC() != surround || PatternChildCount(inner) != 2 ||
+                    inner->GetOptionalInt() != 0 || !inner->GetHVOriginRanges().empty())
+                    continue;
+
+                IDS* a = leftForm ? PatternChild(inner, 0) : PatternChild(source, 0);
+                IDS* b = leftForm ? PatternChild(inner, 1) : PatternChild(inner, 0);
+                IDS* c = leftForm ? PatternChild(source, 1) : PatternChild(inner, 1);
+                Pattern regroupedInner(surround, leftForm ? std::vector<IDS*>{b, c}
+                                                         : std::vector<IDS*>{a, b});
+                Pattern regrouped(surround, leftForm ? std::vector<IDS*>{a, &regroupedInner}
+                                                     : std::vector<IDS*>{&regroupedInner, c});
+                if(tryMatch(&regrouped, target, sourceIsCandidate)) return true;
+
+                if(_strictEnclosureMatchForMatch) continue;
+                // 查询与候选两侧都可沿包围方向展开；定位数字与 HV 来源边界仍由上方条件限制。
+                for(const SurroundEqualSyntax& syntax: SurroundEqualTable) {
+                    if(syntax.surround != surround) continue;
+                    const std::vector<IDS*> children =
+                        syntax.surroundedOnFirst ? std::vector<IDS*>{c, b} : std::vector<IDS*>{b, c};
+                    Pattern arrangement(syntax.arrange, children);
+                    Pattern relaxed(surround, {a, &arrangement});
+                    if(tryMatch(&relaxed, target, sourceIsCandidate)) return true;
+                    const IDCtype binaryIDC = syntax.arrange == IDC_VERTICAL_ARRANGE ? IDC_ABOVE_BELOW : IDC_LEFT_RIGHT;
+                    Pattern rawArrangement(binaryIDC, children);
+                    Pattern rawRelaxed(surround, {a, &rawArrangement});
+                    if(tryMatch(&rawRelaxed, target, sourceIsCandidate)) return true;
+
+                    if(sourceIsCandidate || !IsIdeograph(b) || !AsIdeograph(b)->inUnicode() ||
+                        IsSingleStrokeIdeograph(*AsIdeograph(b)) || !IsPattern(PatternChild(target, 1)) ||
+                        HVArrangementType(AsPattern(PatternChild(target, 1))) != syntax.arrange)
+                        continue;
+                    _variableBindings = bindings.GetSaved();
+                    if(!IDSmatch(PatternChild(target, 0), a)) continue;
+
+                    const Ideograph& component = *AsIdeograph(b);
+                    const auto variants = _cache_IdeoSuffixLookup.find(Ideograph(component.GetIdeo()));
+                    if(variants == _cache_IdeoSuffixLookup.end()) continue;
+                    for(const VSandSuffix& variant: variants->second) {
+                        Ideograph glyph(component.GetIdeo(), variant.vs, variant.suffix);
+                        if(glyph == component) continue;
+                        for(IDS* definition: FindIDS(glyph)) {
+                            if(!IsPattern(definition)) continue;
+                            Pattern* expanded = AsPattern(definition);
+                            if(HVArrangementType(expanded) != syntax.arrange ||
+                                !expanded->GetHVOriginRanges().empty())
+                                continue;
+                            std::vector<IDS*> flattened;
+                            if(syntax.surroundedOnFirst) flattened.push_back(c);
+                            for(IDS* node: BorrowPatternIDS(expanded)) flattened.push_back(node);
+                            if(!syntax.surroundedOnFirst) flattened.push_back(c);
+                            Pattern variantArrangement(syntax.arrange, flattened);
+                            Pattern variantQuery(surround, {a, &variantArrangement});
+                            if(tryMatch(&variantQuery, target, false)) return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    };
+
+    if(trySource(candidate, query, true)) return bindings.Finish(true);
+    _variableBindings = bindings.GetSaved();
+    return bindings.Finish(trySource(query, candidate, false));
+}
+
+bool IDSdatabase::MatchApproximateEnclosureLayout(Pattern* candidate, Pattern* query) {
+    // 角包围的组合部件可解释成普通的转角布局，如 ⿸⿰ABC ≈ ⿰A⿱BC。
+    // 每次只变换当前节点，不生成包围规则的递归闭包。
+    auto isCorner = [](IDCtype idc) {
+        return idc == IDC_SURROUND_UPPERLEFT || idc == IDC_SURROUND_UPPERRIGHT ||
+            idc == IDC_SURROUND_LOWERLEFT || idc == IDC_SURROUND_LOWERRIGHT;
+    };
+    const bool candidateCorner = isCorner(candidate->GetIDC());
+    const bool queryCorner = isCorner(query->GetIDC());
+    if((!candidateCorner && !queryCorner) ||
+        (!candidateCorner && HVArrangementType(candidate) == IDC_UNKNOWN) ||
+        (!queryCorner && HVArrangementType(query) == IDC_UNKNOWN)) return false;
+    auto layoutsFor = [&](Pattern* source, bool querySide) {
+        IDSOwnerList layouts;
+        const IDCtype surround = source->GetIDC();
+        if(!isCorner(surround) ||
+            PatternChildCount(source) != 2 || !source->GetHVOriginRanges().empty() ||
+            (source->GetOptionalInt() != 0 &&
+                (!querySide || source->GetOptionalInt() != IDS_ANY_SURROUND_POSITION)))
+            return layouts;
+
+        IDS* wrapper = PatternChild(source, 0);
+        const std::vector<IDS*> expansions = IsPattern(wrapper) ? std::vector<IDS*>{wrapper}
+            : IsIdeograph(wrapper) ? FindIDS(*AsIdeograph(wrapper)) : std::vector<IDS*>{};
+        for(IDS* expansion: expansions) {
+            if(!IsPattern(expansion)) continue;
+            Pattern* inner = AsPattern(expansion);
+            const IDCtype axis = HVArrangementType(inner);
+            if(axis != IDC_HORIZONAL_ARRANGE && axis != IDC_VERTICAL_ARRANGE) continue;
+            const size_t count = PatternChildCount(inner);
+            const bool peelFirst = ReassociatedEnclosureEdge(surround, axis) > 0;
+            const IDCtype otherAxis = axis == IDC_HORIZONAL_ARRANGE
+                ? IDC_VERTICAL_ARRANGE : IDC_HORIZONAL_ARRANGE;
+            const bool remainingFirst = ReassociatedEnclosureEdge(surround, otherAxis) > 0;
+            for(size_t split = 1; split < count; ++split) {
+                const size_t first = peelFirst ? split : 0;
+                const size_t last = peelFirst ? count : split;
+                const size_t edgeFirst = peelFirst ? 0 : split;
+                const size_t edgeLast = peelFirst ? split : count;
+                std::vector<HVOriginRange> remainderOrigins, edgeOrigins;
+                bool crossesOrigin = false;
+                for(const HVOriginRange& origin: inner->GetHVOriginRanges()) {
+                    if(origin.first < split && origin.last > split) {
+                        crossesOrigin = true;
+                        break;
+                    }
+                    HVOriginRange rebased = origin;
+                    if(origin.first >= first && origin.last <= last) {
+                        rebased.first -= first;
+                        rebased.last -= first;
+                        remainderOrigins.push_back(std::move(rebased));
+                    } else {
+                        rebased.first = origin.first - edgeFirst + (peelFirst ? 0 : 1);
+                        rebased.last = origin.last - edgeFirst + (peelFirst ? 0 : 1);
+                        edgeOrigins.push_back(std::move(rebased));
+                    }
+                }
+                if(crossesOrigin || (last - first == 1 && !remainderOrigins.empty())) continue;
+                IDSOwner remainderOwner;
+                IDS* remainder = PatternChild(inner, first);
+                if(last - first > 1) {
+                    std::vector<IDS*> remaining;
+                    for(size_t index = first; index < last; ++index)
+                        remaining.push_back(PatternChild(inner, index));
+                    remainderOwner.reset(new Pattern(axis, remaining, SIZE_MAX, nullptr, {}, 0,
+                        std::move(remainderOrigins)));
+                    remainder = remainderOwner.get();
+                }
+                IDS* enclosed = PatternChild(source, 1);
+                Pattern corner(otherAxis, remainingFirst ? std::vector<IDS*>{remainder, enclosed}
+                                                        : std::vector<IDS*>{enclosed, remainder});
+                std::vector<IDS*> children;
+                if(!peelFirst) children.push_back(&corner);
+                for(size_t index = edgeFirst; index < edgeLast; ++index)
+                    children.push_back(PatternChild(inner, index));
+                if(peelFirst) children.push_back(&corner);
+                layouts.push_back(IDSOwner(new Pattern(axis, children, SIZE_MAX, nullptr, {}, 0,
+                    std::move(edgeOrigins))));
+            }
+        }
+        return layouts;
+    };
+    VariableBindingScope bindings(_variableBindings);
+    auto tryMatch = [&](Pattern* actual, Pattern* wanted) {
+        const IDCtype axis = HVArrangementType(actual);
+        if((axis != IDC_HORIZONAL_ARRANGE && axis != IDC_VERTICAL_ARRANGE) ||
+            HVArrangementType(wanted) != axis) return false;
+        _variableBindings = bindings.GetSaved();
+        Pattern normalizedActual(axis, BorrowPatternIDS(actual), actual->GetPreferSplitPoint(), nullptr, {}, 0,
+            actual->GetHVOriginRanges());
+        Pattern normalizedWanted(axis, BorrowPatternIDS(wanted), wanted->GetPreferSplitPoint(), nullptr, {}, 0,
+            wanted->GetHVOriginRanges());
+        return MatchNormalizedPatterns(&normalizedActual, &normalizedWanted);
+    };
+    const IDSOwnerList queryLayouts = layoutsFor(query, true);
+    for(const auto& layout: queryLayouts)
+        if(tryMatch(candidate, AsPattern(layout.get()))) return bindings.Finish(true);
+    const IDSOwnerList candidateLayouts = layoutsFor(candidate, false);
+    for(const auto& layout: candidateLayouts)
+        if(tryMatch(AsPattern(layout.get()), query)) return bindings.Finish(true);
+    for(const auto& actual: candidateLayouts)
+        for(const auto& wanted: queryLayouts)
+            if(tryMatch(AsPattern(actual.get()), AsPattern(wanted.get()))) return bindings.Finish(true);
+    return false;
 }
 
 const IDCtype surroundIDC[] = {
@@ -3441,6 +3889,8 @@ bool IDSdatabase::IDSsurroundMatch(Pattern* pidsInDB, Pattern* pids) {
     // Precedent condition checking
     if(pids->GetIDC() != pidsInDB->GetIDC()) return false;
     if(!IsSurroundIDC(pids->GetIDC())) return false;
+    if(pids->GetOptionalInt() != IDS_ANY_SURROUND_POSITION &&
+        pids->GetOptionalInt() != pidsInDB->GetOptionalInt()) return false;
     if(!IsWildcard(PatternChild(pids, 1))) return false;
     // Extract the first element of 'pidsInDB'
     auto      idsInDBelement1 = PatternChild(pidsInDB, 0), idselement1 = PatternChild(pids, 0);
@@ -3593,7 +4043,22 @@ bool IDSdatabase::IDSsearch(IDS* remain, std::vector<IDS*>& terms, IDSOwner* new
                     break;
                 }
         if(canExpand && _cache_BasicIdeo.find(ideograph) == _cache_BasicIdeo.end()) {
-            for(IDS* expanded: FindIDS(ideograph)) {
+            std::vector<IDS*> definitions = FindIDS(ideograph);
+            const bool hasOrigin = std::any_of(definitions.begin(), definitions.end(), HasHVOriginRange);
+            if(hasOrigin) {
+                const auto rawDefinitions = _rawIDSDB.find(ideograph);
+                if(rawDefinitions != _rawIDSDB.end())
+                    for(const auto& raw: rawDefinitions->second) {
+                        bool duplicate = false;
+                        for(IDS* cached: definitions)
+                            if(IDSequal(cached, raw.get())) {
+                                duplicate = true;
+                                break;
+                            }
+                        if(!duplicate) definitions.push_back(raw.get());
+                    }
+            }
+            for(IDS* expanded: definitions) {
                 IDSOwner          expandedCandidate = expanded->Clone();
                 IDSOwner          expandedRemain;
                 std::vector<IDS*> branchTerms = terms;
@@ -3758,7 +4223,11 @@ bool IDSdatabase::ContainsQueryOnlyOperator(IDS* ids) {
     if(!IsPattern(ids)) return false;
 
     Pattern* pattern = AsPattern(ids);
+    if(pattern->GetOptionalInt() == IDS_ANY_SURROUND_POSITION) return true;
     if(IsReplaceIDC(pattern->GetIDC()) || IsSubtractIDC(pattern->GetIDC())) return true;
+    if(pattern->GetIDC() == IDC_OVERLAY)
+        for(const OverlapMatrix& matrix: pattern->GetOverlapMatrices())
+            if(matrix.HasQueryWildcard()) return true;
 
     for(const auto& child: pattern->GetpIDSRef())
         if(ContainsQueryOnlyOperator(child.get())) return true;
@@ -3814,7 +4283,7 @@ IDSOwner IDSdatabase::ReplaceArrangementComponents(Pattern* pattern, const Ideog
     pattern->GetOverlayRange(overlayRange);
     std::vector<IDS*> childPointers = BorrowIDSList(replacedChildren);
     return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, newSplit, overlayRange, pattern->GetOverlayType(),
-        pattern->GetOptionalInt()));
+        pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
 }
 
 IDSOwner IDSdatabase::ReplaceComponent(IDS* ids, const Ideograph& sourceComponent,
@@ -3847,71 +4316,84 @@ IDSOwner IDSdatabase::ReplaceComponent(IDS* ids, const Ideograph& sourceComponen
     pattern->GetOverlayRange(overlayRange);
     std::vector<IDS*> childPointers = BorrowIDSList(children);
     return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), overlayRange,
-        pattern->GetOverlayType(), pattern->GetOptionalInt()));
+        pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
 }
 
 static IDSOwner RemoveComponent(
-    IDS* ids, const Ideograph& sourceComponent, const IDSOwnerList& componentVariants, bool& removed);
+    IDS* ids, const Ideograph& sourceComponent, const IDSOwnerList& componentVariants,
+    size_t targetIndex, size_t& occurrence, bool& removed);
 
 static IDSOwner RemoveArrangementComponents(
-    Pattern* pattern, const Ideograph& sourceComponent, const IDSOwnerList& componentVariants, bool& removed) {
+    Pattern* pattern, const Ideograph& sourceComponent, const IDSOwnerList& componentVariants,
+    size_t targetIndex, size_t& occurrence, bool& removed) {
     const IDSOwnerList& originalChildren = pattern->GetpIDSRef();
     IDSOwnerList        children;
     children.reserve(originalChildren.size());
-    for(const auto& child: originalChildren) {
-        IDSOwner reduced = RemoveComponent(child.get(), sourceComponent, componentVariants, removed);
-        if(reduced != nullptr) children.push_back(std::move(reduced));
-    }
-
-    IDSOwnerList reducedChildren;
-    reducedChildren.reserve(children.size());
     const size_t originalSplit = pattern->GetPreferSplitPoint();
     size_t       newSplit      = SIZE_MAX;
-    for(size_t index = 0; index < children.size();) {
-        const size_t fragmentLength =
-            FindArrangementFragmentLength(children, index, pattern->GetIDC(), componentVariants);
+    for(size_t index = 0; index < originalChildren.size();) {
+        const size_t fragmentLength = removed ? 0 :
+            FindArrangementFragmentLength(originalChildren, index, pattern->GetIDC(), componentVariants);
         if(fragmentLength != 0) {
-            removed = true;
-            index  += fragmentLength;
+            if(occurrence++ == targetIndex) {
+                removed = true;
+                index += fragmentLength;
+                continue;
+            }
+            for(size_t offset = 0; offset < fragmentLength; offset++) {
+                if(index + offset == originalSplit) newSplit = children.size();
+                children.push_back(originalChildren[index + offset]->Clone());
+            }
+            index += fragmentLength;
             continue;
         }
-
-        if(index == originalSplit) newSplit = reducedChildren.size();
-        reducedChildren.push_back(std::move(children[index]));
+        IDSOwner reduced = removed ? originalChildren[index]->Clone() :
+            RemoveComponent(originalChildren[index].get(), sourceComponent, componentVariants,
+                targetIndex, occurrence, removed);
+        if(index == originalSplit && reduced != nullptr) newSplit = children.size();
+        if(reduced != nullptr) children.push_back(std::move(reduced));
         index++;
     }
 
     if(!removed) return pattern->Clone();
-    if(reducedChildren.empty()) return IDSOwner();
-    if(reducedChildren.size() == 1) return std::move(reducedChildren.front());
+    if(children.empty()) return IDSOwner();
+    if(children.size() == 1) return std::move(children.front());
 
     int overlayRange[2];
     pattern->GetOverlayRange(overlayRange);
-    std::vector<IDS*> childPointers = BorrowIDSList(reducedChildren);
+    std::vector<IDS*> childPointers = BorrowIDSList(children);
     return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, newSplit, overlayRange, pattern->GetOverlayType(),
-        pattern->GetOptionalInt()));
+        pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
 }
 
 static IDSOwner RemoveComponent(
-    IDS* ids, const Ideograph& sourceComponent, const IDSOwnerList& componentVariants, bool& removed) {
+    IDS* ids, const Ideograph& sourceComponent, const IDSOwnerList& componentVariants,
+    size_t targetIndex, size_t& occurrence, bool& removed) {
     if(IsIdeograph(ids)) {
         if(*AsIdeograph(ids) == sourceComponent) {
-            removed = true;
-            return IDSOwner();
+            if(occurrence++ == targetIndex) {
+                removed = true;
+                return IDSOwner();
+            }
         }
         return ids->Clone();
     }
+    // 笔画链是不可拆分的单元，不能将其内部笔画列为减法位置。
     if(!IsPattern(ids)) return ids->Clone();
 
     for(const auto& variant: componentVariants)
         if(IDSequal(ids, variant.get())) {
-            removed = true;
-            return IDSOwner();
+            if(occurrence++ == targetIndex) {
+                removed = true;
+                return IDSOwner();
+            }
+            return ids->Clone();
         }
 
     Pattern* pattern = AsPattern(ids);
     if(IsArrangeIDC(pattern->GetIDC()))
-        return RemoveArrangementComponents(pattern, sourceComponent, componentVariants, removed);
+        return RemoveArrangementComponents(pattern, sourceComponent, componentVariants,
+            targetIndex, occurrence, removed);
 
     const IDSOwnerList& originalChildren = pattern->GetpIDSRef();
     IDSOwnerList        children;
@@ -3919,7 +4401,9 @@ static IDSOwner RemoveComponent(
     const size_t originalSplit = pattern->GetPreferSplitPoint();
     size_t       newSplit      = SIZE_MAX;
     for(size_t index = 0; index < originalChildren.size(); index++) {
-        IDSOwner reduced = RemoveComponent(originalChildren[index].get(), sourceComponent, componentVariants, removed);
+        IDSOwner reduced = removed ? originalChildren[index]->Clone() :
+            RemoveComponent(originalChildren[index].get(), sourceComponent, componentVariants,
+                targetIndex, occurrence, removed);
         if(reduced == nullptr) continue;
         if(index == originalSplit) newSplit = children.size();
         children.push_back(std::move(reduced));
@@ -3933,7 +4417,7 @@ static IDSOwner RemoveComponent(
     pattern->GetOverlayRange(overlayRange);
     std::vector<IDS*> childPointers = BorrowIDSList(children);
     return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, newSplit, overlayRange, pattern->GetOverlayType(),
-        pattern->GetOptionalInt()));
+        pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
 }
 
 IDSOwnerList IDSdatabase::BuildReplaceQueries(Pattern* replaceQuery) {
@@ -3979,21 +4463,81 @@ IDSOwnerList IDSdatabase::BuildSubtractQueries(Pattern* subtractQuery) {
 
     const Ideograph component         = *AsIdeograph(sourceComponent);
     IDSOwnerList    componentVariants = BuildComponentVariants(component);
+    auto countOccurrences = [&](IDS* value) {
+        size_t count = 0;
+        bool removed = false;
+        RemoveComponent(value, component, componentVariants, SIZE_MAX, count, removed);
+        return count;
+    };
+    std::unordered_set<std::string> visiting;
+    std::function<IDSOwner(IDS*, size_t)> expandForSubtraction;
+    expandForSubtraction = [&](IDS* value, size_t depth) -> IDSOwner {
+        if(value == nullptr) return IDSOwner();
+        if(IsIdeograph(value)) {
+            const Ideograph glyph = *AsIdeograph(value);
+            if(glyph == component || depth == 0 || !visiting.insert(glyph.toString()).second)
+                return value->Clone();
+            IDSOwner best = value->Clone();
+            size_t bestCount = 0;
+            for(IDS* candidate: FindIDS(glyph)) {
+                IDSOwner expanded = expandForSubtraction(candidate, depth - 1);
+                const size_t count = countOccurrences(expanded.get());
+                if(count > bestCount) {
+                    bestCount = count;
+                    best = std::move(expanded);
+                }
+            }
+            visiting.erase(glyph.toString());
+            return best;
+        }
+        if(!IsPattern(value) || depth == 0) return value->Clone();
+        for(const auto& variant: componentVariants)
+            if(IDSequal(value, variant.get())) return value->Clone();
+        Pattern* pattern = AsPattern(value);
+        IDSOwnerList children;
+        for(const auto& child: pattern->GetpIDSRef())
+            children.push_back(expandForSubtraction(child.get(), depth));
+        int range[2] = {0, 0};
+        pattern->GetOverlayRange(range);
+        std::vector<IDS*> childPointers = BorrowIDSList(children);
+        return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), range,
+            pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
+    };
+    IDSOwner canonicalSource;
+    size_t maximumOccurrences = 0;
     for(auto sourceIDS: FindIDS(*AsIdeograph(source))) {
         IDSOwnerList sourceAlternatives = HVExtractOwned(sourceIDS);
         for(const auto& normalizedSource: sourceAlternatives) {
-            bool     removed = false;
-            IDSOwner query   = RemoveComponent(normalizedSource.get(), component, componentVariants, removed);
-            if(!removed || query == nullptr) continue;
-
-            bool duplicate = false;
-            for(const auto& existing: queries)
-                if(IDSequal(existing.get(), query.get())) {
-                    duplicate = true;
-                    break;
-                }
-            if(!duplicate) queries.push_back(std::move(query));
+            IDSOwner expanded = expandForSubtraction(normalizedSource.get(), 4);
+            const size_t count = countOccurrences(expanded.get());
+            if(count > maximumOccurrences) {
+                maximumOccurrences = count;
+                // 不把不同来源式的第 n 个位置混为同一个编号。
+                canonicalSource = std::move(expanded);
+            }
         }
+    }
+    if(canonicalSource == nullptr) return queries;
+    bool removed = false;
+    size_t occurrence = 0;
+    IDSOwner query = RemoveComponent(canonicalSource.get(), component, componentVariants,
+        static_cast<size_t>(subtractQuery->GetOptionalInt()), occurrence, removed);
+    if(removed && query != nullptr) {
+        if(IsIdeograph(query.get())) {
+            for(IDS* definition: FindIDS(*AsIdeograph(query.get()))) {
+                if(definition->GetUniqueSeparator().empty()) continue;
+                IDSOwner shape = definition->Clone();
+                shape->SetUniqueSeparator("");
+                bool duplicate = false;
+                for(const auto& existing: queries)
+                    if(IDSequal(existing.get(), shape.get())) {
+                        duplicate = true;
+                        break;
+                    }
+                if(!duplicate) queries.push_back(std::move(shape));
+            }
+        }
+        queries.push_back(std::move(query));
     }
     return queries;
 }
@@ -4082,7 +4626,7 @@ IDSOwner IDSdatabase::PreprocessReplaceSubtractQuery(IDS* ids, size_t maximum) {
         int overlayRange[2] = {0, 0};
         pattern->GetOverlayRange(overlayRange);
         return IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(),
-            overlayRange, pattern->GetOverlayType(), pattern->GetOptionalInt()));
+            overlayRange, pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags()));
     };
 
     return preprocessNode(ids);
@@ -4375,7 +4919,7 @@ IDSOwnerList IDSdatabase::ExpandIWDSQuery(IDS* ids, size_t maximum) {
                 candidatePattern->GetOverlayRange(overlayRange);
                 IDSOwner expandedPattern = IDSOwner(new Pattern(candidatePattern->GetIDC(), childPointers,
                     candidatePattern->GetPreferSplitPoint(), overlayRange, candidatePattern->GetOverlayType(),
-                    candidatePattern->GetOptionalInt()));
+                    candidatePattern->GetOptionalInt(), {}, candidatePattern->GetOverlayRangeFlags()));
                 const std::string expandedPatternKey = expandedPattern->toString();
                 MergeQueryPreprocessRules(expandedPatternKey, candidate->toString());
                 for(const auto& child: children)
@@ -4540,7 +5084,7 @@ IDSOwnerList IDSdatabase::BuildEquivalentQueryOwners(IDS* ids, size_t maximum) {
             pattern->GetOverlayRange(overlayRange);
             appendYibai(result,
                 IDSOwner(new Pattern(pattern->GetIDC(), childPointers, pattern->GetPreferSplitPoint(), overlayRange,
-                    pattern->GetOverlayType(), pattern->GetOptionalInt())));
+                    pattern->GetOverlayType(), pattern->GetOptionalInt(), {}, pattern->GetOverlayRangeFlags())));
 
             if(pattern->GetIDC() == IDC_ABOVE_MIDDLE_BELOW && childPointers.size() == 3) {
                 const std::vector<Ideograph> wrappers = findYibaiWrappers(childPointers[0], childPointers[2]);
@@ -4764,18 +5308,29 @@ std::vector<IDSMatchDetail> IDSdatabase::MatchDetailed(IDS* ids, const IDSqueryO
     std::vector<IDSMatchDetail> details;
     if(ids == nullptr) return details;
 
-    const std::vector<Ideograph>            matches           = MatchQuery(ids, options);
-    const std::vector<std::string>          equivalentQueries = GetEquivalentQueries(ids);
+    const std::vector<Ideograph> matches = MatchQuery(ids, options);
+    std::vector<std::string> equivalentQueries;
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->detailSyntaxUs : nullptr);
+        equivalentQueries = GetEquivalentQueries(ids);
+    }
     std::unordered_map<std::string, size_t> equivalentIndexes;
     for(size_t index = 0; index < equivalentQueries.size(); index++)
         equivalentIndexes.emplace(equivalentQueries[index], index);
 
     ScopedBoolean overlayFilter(_ignoreOverlayStructureForMatch, options.filter.ignoreOverlayStructure);
+    ScopedBoolean overlapMode(_constrainOverlapForMatch,
+        options.overlapMatchMode == IDS_OVERLAP_MATCH_CONSTRAINED);
+    ScopedBoolean strictEnclosure(_strictEnclosureMatchForMatch, options.strictEnclosureMatch);
     details.reserve(matches.size());
-    for(const Ideograph& glyph: matches) {
-        IDSMatchDetail detail;
-        if(BuildMatchDetailForGlyph(glyph, ids, options, equivalentIndexes, detail))
-            details.push_back(std::move(detail));
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->detailBuildUs : nullptr);
+        for(const Ideograph& glyph: matches) {
+            if(options.profile != nullptr) ++options.profile->detailedGlyphs;
+            IDSMatchDetail detail;
+            if(BuildMatchDetailForGlyph(glyph, ids, options, equivalentIndexes, detail))
+                details.push_back(std::move(detail));
+        }
     }
     return details;
 }
@@ -5437,8 +5992,16 @@ std::vector<Ideograph> IDSdatabase::MatchQuery(IDS* ids, const IDSqueryOptions& 
 
     // Strict raw IDS duplicates are indexed separately so they are always
     // returned, even when their HV cache took a different expansion path.
-    AppendSameIDSMatches(ids, options, out);
-    IDSOwnerList alternatives = BuildEquivalentQueryOwners(ids);
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->sameIDSUs : nullptr);
+        AppendSameIDSMatches(ids, options, out);
+    }
+    IDSOwnerList alternatives;
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->preprocessingUs : nullptr);
+        alternatives = BuildEquivalentQueryOwners(ids);
+    }
+    if(options.profile != nullptr) options.profile->equivalentQueries += alternatives.size();
     // 严格 locale 筛选必须等所有等效表达式合并后再执行。
     IDSqueryOptions alternativeOptions = options;
     if(options.filter.resultFilter == IDS_RESULT_IGNORE_OTHER_LOCALES_BASE_ONLY ||
@@ -5449,7 +6012,10 @@ std::vector<Ideograph> IDSdatabase::MatchQuery(IDS* ids, const IDSqueryOptions& 
         for(const Ideograph& match: matches)
             if(std::find(out.begin(), out.end(), match) == out.end()) out.push_back(match);
     }
-    ApplyResultFilter(out, options);
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->resultFilterUs : nullptr);
+        ApplyResultFilter(out, options);
+    }
     return out;
 }
 
@@ -5466,26 +6032,47 @@ std::vector<Ideograph> IDSdatabase::Match(
     // 预处理后的多个结果会收拢为一个 <any=...>，只进行一次数据库遍历。
     IDSOwner queryOnlyPreprocessed;
     if(ContainsReplaceSubtractOperator(ids)) {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->preprocessingUs : nullptr);
         queryOnlyPreprocessed = PreprocessReplaceSubtractQuery(ids, std::numeric_limits<size_t>::max());
         if(queryOnlyPreprocessed == nullptr) return out;
         ids = queryOnlyPreprocessed.get();
     }
 
-    AppendSameIDSMatches(ids, options, out);
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->sameIDSUs : nullptr);
+        AppendSameIDSMatches(ids, options, out);
+    }
     // Variables are scoped to one top-level query, never to database cache construction.
     _variableBindings.clear();
     _searchTermMemo.clear();
     ScopedBoolean overlayFilter(_ignoreOverlayStructureForMatch, options.filter.ignoreOverlayStructure);
+    ScopedBoolean overlapMode(_constrainOverlapForMatch,
+        options.overlapMatchMode == IDS_OVERLAP_MATCH_CONSTRAINED);
+    ScopedBoolean strictEnclosure(_strictEnclosureMatchForMatch, options.strictEnclosureMatch);
     IDSOwnerList  queries;
     queries.push_back(ids->Clone());
-
+    IdeographSet rawLiteralCandidates;
     IdeographSet indexedCandidates;
-    const bool hasIndexedCandidates = FindIndexedSearchCandidates(ids, indexedCandidates);
+    bool hasRawLiteralIndex = false;
+    bool hasIndexedCandidates = false;
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->candidateIndexUs : nullptr);
+        hasRawLiteralIndex = FindRawLiteralSearchCandidates(ids, rawLiteralCandidates);
+        hasIndexedCandidates = FindIndexedSearchCandidates(ids, indexedCandidates);
+    }
+    if(options.profile != nullptr) {
+        ++options.profile->indexAttempts;
+        if(hasIndexedCandidates) {
+            ++options.profile->indexedPasses;
+            options.profile->indexedCandidates += indexedCandidates.size();
+        }
+    }
 
     const size_t queryCount   = queries.size();
     const size_t dbCount      = _idsDB.size();
     int          prevProgress = -1;
     size_t       queryIndex   = 0;
+    ScopedQueryProfileTimer scanTimer(options.profile != nullptr ? &options.profile->candidateScanUs : nullptr);
     for(const auto& query: queries) {
         const double      queryProgress = queryCount == 0 ? 0.0 : static_cast<double>(queryIndex) * 100.0 / queryCount;
         SearchExpression* topLevelExcept =
@@ -5494,6 +6081,7 @@ std::vector<Ideograph> IDSdatabase::Match(
             : nullptr;
         size_t dbIndex = 0;
         for(const auto& i: _idsDB) {
+            if(options.profile != nullptr) ++options.profile->visitedGlyphs;
             if(progressCallback) {
                 const double currentProgressValue =
                     queryProgress + (dbCount == 0 ? 0.0 : static_cast<double>(dbIndex) * 100.0 / dbCount / queryCount);
@@ -5511,6 +6099,7 @@ std::vector<Ideograph> IDSdatabase::Match(
                 if(progressCallback) ++dbIndex;
                 continue;
             }
+            if(options.profile != nullptr) ++options.profile->evaluatedGlyphs;
             bool       matched                  = false;
             bool       hasEligibleIDS           = false;
             bool       excludedByTopLevelExcept = false;
@@ -5528,6 +6117,7 @@ std::vector<Ideograph> IDSdatabase::Match(
                         }
                         continue;
                     }
+                    if(matchQuery && options.profile != nullptr) ++options.profile->entryMatchAttempts;
                     const bool entryMatched = matchQuery && IDSmatch(j.get(), query.get());
                     if(entryMatched) return true;
                 }
@@ -5545,6 +6135,18 @@ std::vector<Ideograph> IDSdatabase::Match(
                 if(!matched && config.fuzzyMatch.strokeNeutralComposition &&
                     composedEntries != _strokeNeutralCompositionDB.end())
                     matched = evaluateEntries(composedEntries->second, true);
+                // 带来源范围的 HV 展开可能遮蔽原始部件；原式倒排只筛选补查对象。
+                if(!matched && IsSearchExpression(query.get()) && rawEntries != _rawIDSDB.end()) {
+                    if(!hasRawLiteralIndex || rawLiteralCandidates.find(i.first) != rawLiteralCandidates.end()) {
+                        bool hasOrigin = false;
+                        for(const auto& entry: i.second)
+                            if(HasHVOriginRange(entry.get())) {
+                                hasOrigin = true;
+                                break;
+                            }
+                        if(hasOrigin) matched = evaluateEntries(rawEntries->second, true);
+                    }
+                }
             }
             if(!hasEligibleIDS) matched = false;
             if(matched) {
@@ -5560,7 +6162,11 @@ std::vector<Ideograph> IDSdatabase::Match(
         }
         if(progressCallback) ++queryIndex;
     }
-    ApplyResultFilter(out, options);
+    scanTimer.Stop();
+    {
+        ScopedQueryProfileTimer timer(options.profile != nullptr ? &options.profile->resultFilterUs : nullptr);
+        ApplyResultFilter(out, options);
+    }
     return out;
 }
 

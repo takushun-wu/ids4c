@@ -8,6 +8,8 @@ This document describes the Python binding. For building, Python-version/toolcha
 
 ```python
 import ids4c
+print(ids4c.__version__)    # 0.4.0
+print(ids4c.__copyright__)
 ```
 
 Main interfaces:
@@ -74,8 +76,12 @@ Common properties:
 | terms | Search-expression terms |
 | except_terms | Exclusion terms |
 | mode | all, any, or except |
+| unique_separator | Root uniqueness metadata, such as `{glyph}`, or an empty string |
+| is_alternative_definition | Whether an imported definition belongs to the alternative group |
 
 Ideograph nodes also expose glyph, codepoint, variation_selector, suffix, and abstract_name.
+
+`is_alternative_definition` is source metadata, not a component or an exclusion condition. A directly parsed node defaults to False; inspect `database.raw_ids()` for flags retained from imported YiBai definitions. Exact tree comparison does not distinguish definition groups. Overlap modifiers are preserved in `text`; typed `OverlapMatrix` objects are not currently exposed as Python properties.
 
 Stroke nodes expose stroke_data, break_positions, cross_data, and enclosed. Search-parameter nodes expose param, stroke_minimum, and stroke_maximum. Variable nodes expose variable_name.
 
@@ -154,6 +160,8 @@ match() returns only the matching glyph strings.
 ```python
 options = ids4c.QueryOptions()
 options.track_match_paths = True
+options.overlap_match_mode = ids4c.OverlapMatchMode.IGNORE
+options.strict_enclosure_match = False
 options.filter.ignore_overlay_structure = True
 options.filter.result_filter = ids4c.ResultFilter.IGNORE_OTHER_LOCALES_KEEP_IVS
 options.filter.glyph_domain = ids4c.GlyphDomain.UNICODE
@@ -165,6 +173,8 @@ matches = database.match(query, options)
 QueryOptions:
 
 - filter: a FilterOptions object;
+- overlap_match_mode: `OverlapMatchMode.IGNORE` (default) or `CONSTRAINED`; the latter checks overlap matrices and query wildcards;
+- strict_enclosure_match: defaults to False. True disables approximate enclosure layouts but retains exact reassociation; it does not disable IWDS;
 - track_match_paths: whether to calculate detailed match paths. Set it to False when only glyph names are needed.
 
 FilterOptions:
@@ -174,10 +184,24 @@ FilterOptions:
 - glyph_domain: ALL, UNICODE, PRIVATE, or ABSTRACT;
 - unicode_blocks: one or more UnicodeBlock values;
 - custom_ranges: names of registered custom ranges.
+- locale_suffix_fallback_order: a list of priority groups, for example `["C=G", ".", "H", "T"]`; `=` means equal priority and `.` means no suffix. Do not assign the CLI string `C=G>.>H>T` directly.
 
 The current Python binding can select ranges registered by the host application, but does not yet expose range registration.
 `IGNORE_OTHER_LOCALES_BASE_ONLY` collapses IVS variants of a base code point. `IGNORE_OTHER_LOCALES_KEEP_IVS` keeps each base/variation-selector pair, including the no-selector form, independent. Strict locale filtering selects only among results that matched the query. `options.filter.locale_suffix_fallback_order` can specify the suffix priority; the old `IGNORE_OTHER_LOCALES` enum value is unavailable.
 Available enums include ResultFilter, GlyphDomain, UnicodeBlock, IWDSUnificationLevel, and DatabaseFormat.
+
+If no unsuffixed definition exists, an explicit suffix order lets locale filtering retain matching localized definitions from the preferred available group. If an unsuffixed definition exists but does not match, a localized hit does not replace it. Keep this result-selection setting distinct from `config.fuzzy_match.locale_suffix_fallback_order`, which controls component-definition lookup.
+
+Constrained overlap example:
+
+```python
+options = ids4c.QueryOptions()
+options.overlap_match_mode = ids4c.OverlapMatchMode.CONSTRAINED
+query = ids4c.parse("⿻[?,x]丨日")
+matches = database.match(query, options)
+```
+
+Here `?` matches one whole row, including an empty row. For all wildcards and enclosure rules, see [query-syntax.md](query-syntax.md). The C++ `IDSQueryProfile` timer is not currently exposed in Python; use CLI `--profile` for stage diagnostics.
 
 ## Detailed results
 
@@ -245,6 +269,7 @@ config.fuzzy_match.unification_level = (
     ids4c.IWDSUnificationLevel.SOURCE_CODE_SEPARATION
 )
 config.fuzzy_match.default_region = "G"
+config.fuzzy_match.locale_suffix_fallback_order = ["C=G", ".", "H", "T"]
 config.fuzzy_match.stroke_neutral_composition = True
 config.fuzzy_match.exclude_non_equivalent_same_ids = True
 config.misc.enable_cache = True
@@ -255,6 +280,7 @@ database.config = config
 ```
 
 DatabaseConfig contains fuzzy_match and misc configuration groups. Changes affect subsequent operations on that Database object.
+`default_region` supplies a fallback suffix. `fuzzy_match.locale_suffix_fallback_order` provides an ordered component-definition fallback when the exact glyph definition is unavailable; existing explicitly suffixed definitions take precedence. For output selection, set `options.filter.locale_suffix_fallback_order` separately, using the same list format.
 `exclude_non_equivalent_same_ids` defaults to True: glyphs explicitly distinguished by `{glyph}` are not unified merely because they share an IDS expression. Set it to False to allow those same-IDS matches.
 
 ## Import data
@@ -281,6 +307,9 @@ Import failures raise RuntimeError. Read database.last_error and database.last_i
 `last_import_report` is a dictionary containing fields such as `input_lines`, `data_lines`, `source_expressions`, `accepted_expressions`, `rejected_expressions`, `query_cache_entries`, `rebuilt_cache_glyphs`, `cache_truncations`, and `issues`. Each item in `issues` includes `line`, `ids_index`, `character_index`, `glyph`, `expression`, and `message`, which can be used to display the exact import location.
 
 After import, the database builds the HV cache, stroke-neutral composition cache, and first-level component index from the raw IDS. `raw_ids()` returns original definitions, while `ids()` returns query-cache entries. A missing or older index is rebuilt or migrated when loading the database. To regenerate derived data from the raw definitions, reimport the database or use the C++ API `RebuildQueryCache()`. The C++ import API supports stage callbacks; they are not exposed by this Python binding.
+
+In 0.4.0, YiBai databases require schema 8 and must be reimported from source if created with an older schema. Cache rebuilding cannot recover alternative-definition metadata. A full base import replaces database contents; reimport private extensions afterwards. Keep both sets of source files. See [cli.md](cli.md#upgrading-to-040) for the upgrade workflow.
+
 ## Ownership and threading
 
 - IDSNode objects and database-returned objects own their data;

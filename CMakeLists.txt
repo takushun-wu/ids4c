@@ -1,6 +1,30 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ids4c VERSION 0.3.0 LANGUAGES CXX)
+project(ids4c VERSION 0.4.0 LANGUAGES CXX)
+
+set(IDS4C_COPYRIGHT "Copyright 2026 Takushun Wu.")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/ids4c")
+configure_file(
+    "${PROJECT_SOURCE_DIR}/cmake/version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/ids4c/version.h"
+    @ONLY
+)
+
+if(WIN32)
+    enable_language(RC)
+
+    function(ids4c_add_windows_version target filename description file_type)
+        set(IDS4C_RC_FILENAME "${filename}")
+        set(IDS4C_RC_DESCRIPTION "${description}")
+        set(IDS4C_RC_FILE_TYPE "${file_type}")
+        configure_file(
+            "${PROJECT_SOURCE_DIR}/cmake/version.rc.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/${target}_version.rc"
+            @ONLY
+        )
+        target_sources(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated/${target}_version.rc")
+    endfunction()
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +61,7 @@ target_include_directories(ids4c_core
     PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/utf8cpp>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
 )
 
 target_compile_options(ids4c_core
@@ -92,6 +117,10 @@ if(IDS4C_BUILD_CLI)
         OUTPUT_NAME "ids4c-cli"
         VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:ids4c_cli>"
     )
+
+    if(WIN32)
+        ids4c_add_windows_version(ids4c_cli "ids4c-cli.exe" "ids4c command-line interface" VFT_APP)
+    endif()
 endif()
 
 include(CTest)
@@ -146,6 +175,13 @@ if(BUILD_TESTING)
     set_tests_properties(ids4c_db_tests PROPERTIES
         WORKING_DIRECTORY "${IDS4C_TEST_DATA_DIR}"
     )
+
+    if(IDS4C_BUILD_CLI)
+        add_test(NAME ids4c_cli_version COMMAND ids4c_cli --version)
+        set_tests_properties(ids4c_cli_version PROPERTIES
+            PASS_REGULAR_EXPRESSION "ids4c-cli ${PROJECT_VERSION}"
+        )
+    endif()
 endif()
 
 if(IDS4C_BUILD_PYTHON)
@@ -171,6 +207,7 @@ if(IDS4C_BUILD_PYTHON)
 
     if(WIN32)
         set_target_properties(ids4c_python PROPERTIES SUFFIX ".pyd")
+        ids4c_add_windows_version(ids4c_python "ids4c.pyd" "ids4c Python bindings" VFT_DLL)
     endif()
 endif()
 
@@ -211,6 +248,7 @@ if(IDS4C_BUILD_GUI)
 
     if(WIN32)
         set_target_properties(ids4c PROPERTIES WIN32_EXECUTABLE TRUE)
+        ids4c_add_windows_version(ids4c "ids4c.exe" "ids4c graphical interface" VFT_APP)
     endif()
 endif()
 
@@ -218,6 +256,9 @@ include(GNUInstallDirs)
 set(IDS4C_INSTALL_DOCDIR "${CMAKE_INSTALL_DATADIR}/doc/${PROJECT_NAME}")
 
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/ids4c/version.h"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/ids4c"
+)
 install(TARGETS ids4c_core ids4c_db ids4c_tinyxml2
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
@@ -244,5 +285,5 @@ if(IDS4C_BUILD_PYTHON)
     )
 endif()
 
-install(FILES README.md README.zh-CN.md LICENSE NOTICE DESTINATION "${IDS4C_INSTALL_DOCDIR}")
+install(FILES README.md README.zh-CN.md CHANGELOG.md LICENSE NOTICE DESTINATION "${IDS4C_INSTALL_DOCDIR}")
 install(DIRECTORY docs/ DESTINATION "${IDS4C_INSTALL_DOCDIR}/docs")

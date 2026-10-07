@@ -6,6 +6,7 @@
 #include <chrono>
 #include <clocale>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <string>
 
@@ -17,6 +18,7 @@
 
 #include "ids4c/ids4c.h"
 #include "ids4c/idsdb.h"
+#include "ids4c/version.h"
 
 namespace po = boost::program_options;
 
@@ -381,7 +383,8 @@ int main(int argc, char** argv) {
 #endif
 
     po::options_description options("IDS4C options");
-    options.add_options()("help,h", "Show this help message.")("database,d", po::value<std::string>(),
+    options.add_options()("help,h", "Show this help message.")("version,V", "Show version and copyright.")(
+        "database,d", po::value<std::string>(),
         "SQLite database name, without .sqlite.")("query,q", po::value<std::string>(), "Run an IDS query.")(
         "import,i", po::value<std::string>(), "Import an IDS source file into db/DATABASE.sqlite.")(
         "import-private,p", po::value<std::string>(), "Add or update private IDS entries in an existing database.")(
@@ -391,11 +394,15 @@ int main(int argc, char** argv) {
         po::value<std::string>()->default_value("none"), "IWDS fuzzy matching: none, srcseparation, lv1, or lv2.")(
         "default-region", po::value<std::string>()->default_value(""),
         "Fallback glyph region/suffix used when an exact component glyph is unavailable.")(
+        "overlap-match-mode", po::value<std::string>()->default_value("ignore"),
+        "Overlay matching: ignore or constrained.")(
         "ignore-overlay", "Ignore candidates whose matching path uses an overlay structure.")(
+        "strict-enclosure-match", "Disable approximate enclosure layouts; retain exact enclosure reassociation.")(
         "locale-suffix-order", po::value<std::string>()->default_value(""),
         "Locale suffix fallback order; use > for fallback and = for same-level suffixes, for example C=G>.=H.")(
         "disable-same-ids-exclusion", "Allow same-IDS variants marked with {glyph} to match each other.")(
-        "no-match-paths", "Do not calculate match paths in detailed output.")("result-filter",
+        "no-match-paths", "Do not calculate match paths in detailed output.")(
+        "profile", "Print query-stage timings and candidate counts to stderr.")("result-filter",
         po::value<std::string>()->default_value("all"),
         "all, ignore-lc-suffix, ignore-other-locales-base-only, or ignore-other-locales-keep-ivs.")("glyph-domain",
         po::value<std::string>()->default_value("all"), "Glyph domain: all, unicode, private, or abstract.")(
@@ -420,6 +427,11 @@ int main(int argc, char** argv) {
                       << std::endl;
             std::cout << "IWDS:     ids4c-cli --import-iwds SOURCE.xml" << std::endl;
             std::cout << options << std::endl;
+            return 0;
+        }
+        if(values.count("version") != 0) {
+            std::cout << "ids4c-cli " IDS4C_VERSION_STRING "\n" IDS4C_COPYRIGHT "\nLicense: " IDS4C_LICENSE
+                      << std::endl;
             return 0;
         }
         po::notify(values);
@@ -541,7 +553,12 @@ int main(int argc, char** argv) {
 
     IDSqueryOptions queryOptions;
     queryOptions.filter.ignoreOverlayStructure = values.count("ignore-overlay") != 0;
+    queryOptions.strictEnclosureMatch = values.count("strict-enclosure-match") != 0;
     queryOptions.trackMatchPaths               = values.count("no-match-paths") == 0;
+    if(!ParseIDSOverlapMatchMode(values["overlap-match-mode"].as<std::string>(), queryOptions.overlapMatchMode)) {
+        std::cerr << "Invalid --overlap-match-mode value (expected ignore or constrained)." << std::endl;
+        return 2;
+    }
     if(!ParseIDSglyphDomain(values["glyph-domain"].as<std::string>(), queryOptions.filter.glyphDomain)) {
         std::cerr << "Invalid --glyph-domain value: " << values["glyph-domain"].as<std::string>() << std::endl;
         return 2;
@@ -604,7 +621,12 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    const bool profileEnabled = values.count("profile") != 0;
+    IDSQueryProfile profile;
+    if(profileEnabled) queryOptions.profile = &profile;
+    const auto pipelineStarted = std::chrono::steady_clock::now();
     const std::vector<std::string> equivalentQueries = database.GetEquivalentQueries(query.get());
+    const auto syntaxEnded = std::chrono::steady_clock::now();
     if(outputFormat == CLIOutputFormat::TEXT) {
         std::cout << "Equivalent Syntax: ";
         for(const std::string& equivalentQuery: equivalentQueries)
@@ -655,5 +677,27 @@ int main(int argc, char** argv) {
     }
     std::cerr << matches.size() << " match" << (matches.size() == 1 ? "" : "es") << " in " << elapsed.count() << " ms."
               << std::endl;
+    if(profileEnabled) {
+        const auto milliseconds = [](uint64_t microseconds) { return static_cast<double>(microseconds) / 1000.0; };
+        const double syntaxMs = std::chrono::duration<double, std::milli>(syntaxEnded - pipelineStarted).count();
+        const double matchApiMs = std::chrono::duration<double, std::milli>(ended - started).count();
+        std::cerr << std::fixed << std::setprecision(3)
+                  << "[profile] compute_ms=" << syntaxMs + matchApiMs
+                  << " syntax_ms=" << syntaxMs << " match_api_ms=" << matchApiMs << '\n'
+                  << "[profile] stages_ms preprocessing=" << milliseconds(profile.preprocessingUs)
+                  << " same_ids=" << milliseconds(profile.sameIDSUs)
+                  << " candidate_index=" << milliseconds(profile.candidateIndexUs)
+                  << " candidate_scan=" << milliseconds(profile.candidateScanUs)
+                  << " result_filter=" << milliseconds(profile.resultFilterUs)
+                  << " detail_syntax=" << milliseconds(profile.detailSyntaxUs)
+                  << " detail_build=" << milliseconds(profile.detailBuildUs) << '\n'
+                  << "[profile] counts equivalent=" << profile.equivalentQueries
+                  << " index_used=" << profile.indexedPasses << '/' << profile.indexAttempts
+                  << " indexed_candidates=" << profile.indexedCandidates
+                  << " visited_glyphs=" << profile.visitedGlyphs
+                  << " evaluated_glyphs=" << profile.evaluatedGlyphs
+                  << " entry_match_attempts=" << profile.entryMatchAttempts
+                  << " detailed_glyphs=" << profile.detailedGlyphs << std::endl;
+    }
     return 0;
 }

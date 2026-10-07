@@ -8,6 +8,8 @@
 
 ```python
 import ids4c
+print(ids4c.__version__)    # 0.4.0
+print(ids4c.__copyright__)
 ```
 
 主要接口：
@@ -74,8 +76,12 @@ assert ids4c.equal(
 | terms | 搜索表达式条件 |
 | except_terms | 排除条件 |
 | mode | all、any 或 except |
+| unique_separator | 根部唯一化元数据，如 `{字}`，没有时为空字符串 |
+| is_alternative_definition | 导入的定义是否来自另类定义组 |
 
 字形节点还提供 glyph、codepoint、variation_selector、suffix、abstract_name。
+
+`is_alternative_definition` 是来源元数据，不是部件或排除条件。直接解析的节点默认为 False；通过 `database.raw_ids()` 可以检查白式导入后保留的标记。严格树比较不区分定义组。重叠修饰符保留在 `text` 中，当前未向 Python 单独暴露类型化的 `OverlapMatrix` 属性。
 
 笔画节点提供 stroke_data、break_positions、cross_data、enclosed。查询参数节点提供 param、stroke_minimum 和 stroke_maximum；变量节点提供 variable_name。
 
@@ -154,6 +160,8 @@ match() 只返回匹配到的字形字符串。
 ```python
 options = ids4c.QueryOptions()
 options.track_match_paths = True
+options.overlap_match_mode = ids4c.OverlapMatchMode.IGNORE
+options.strict_enclosure_match = False
 options.filter.ignore_overlay_structure = True
 options.filter.result_filter = ids4c.ResultFilter.IGNORE_OTHER_LOCALES_KEEP_IVS
 options.filter.glyph_domain = ids4c.GlyphDomain.UNICODE
@@ -165,6 +173,8 @@ matches = database.match(query, options)
 QueryOptions：
 
 - filter：FilterOptions；
+- overlap_match_mode：`OverlapMatchMode.IGNORE`（默认）或 `CONSTRAINED`；后者检查重叠矩阵及查询通配符；
+- strict_enclosure_match：默认为 False。True 关闭包围近似匹配，保留严格重排，不关闭 IWDS；
 - track_match_paths：是否计算详细匹配路径。只需要字形列表时可以设为 False。
 
 FilterOptions：
@@ -174,10 +184,24 @@ FilterOptions：
 - glyph_domain：ALL、UNICODE、PRIVATE 或 ABSTRACT；
 - unicode_blocks：一个或多个 UnicodeBlock；
 - custom_ranges：已注册的自定义范围名称。
+- locale_suffix_fallback_order：优先级组列表，例如 `["C=G", ".", "H", "T"]`；`=` 表示同级，`.` 表示无后缀。不能直接赋值 CLI 字符串 `C=G>.>H>T`。
 
 当前 Python binding 可以选择已由宿主程序注册的范围，但尚未暴露注册自定义范围的接口。
 `IGNORE_OTHER_LOCALES_BASE_ONLY` 将同一基码位的 IVS 变体合并；`IGNORE_OTHER_LOCALES_KEEP_IVS` 将不同的「基码位 + 异体字选择符」（包括无选择符）视为独立结果。严格 locale 筛选只在本次实际匹配的结果中选择。可用 `options.filter.locale_suffix_fallback_order` 指定后缀优先级；旧枚举值 `IGNORE_OTHER_LOCALES` 已移除。
 可用枚举包括 ResultFilter、GlyphDomain、UnicodeBlock、IWDSUnificationLevel 和 DatabaseFormat。
+
+没有无后缀定义时，明确设置后缀顺序可以让结果筛选保留优先级最高的可用组中实际命中的地区字形；若无后缀定义存在但不匹配，不以其他地区的命中替代它。请区分结果筛选与 `config.fuzzy_match.locale_suffix_fallback_order`：后者用于查找部件定义。
+
+限定重叠状态的示例：
+
+```python
+options = ids4c.QueryOptions()
+options.overlap_match_mode = ids4c.OverlapMatchMode.CONSTRAINED
+query = ids4c.parse("⿻[?,x]丨日")
+matches = database.match(query, options)
+```
+
+此处 `?` 对应一整行，包括空行。完整通配符及包围规则见 [query-syntax-zh.md](query-syntax-zh.md)。C++ 的 `IDSQueryProfile` 尚未暴露给 Python；分段诊断可以使用 CLI `--profile`。
 
 ## 详细结果
 
@@ -245,6 +269,7 @@ config.fuzzy_match.unification_level = (
     ids4c.IWDSUnificationLevel.SOURCE_CODE_SEPARATION
 )
 config.fuzzy_match.default_region = "G"
+config.fuzzy_match.locale_suffix_fallback_order = ["C=G", ".", "H", "T"]
 config.fuzzy_match.stroke_neutral_composition = True
 config.fuzzy_match.exclude_non_equivalent_same_ids = True
 config.misc.enable_cache = True
@@ -255,6 +280,7 @@ database.config = config
 ```
 
 DatabaseConfig 包含 fuzzy_match 和 misc 两组配置。修改配置会影响该对象之后的操作。
+`default_region` 提供回退后缀；`fuzzy_match.locale_suffix_fallback_order` 在精确字形定义不存在时提供查找部件定义的回退顺序，已有的明确后缀定义优先。结果筛选需另行设置 `options.filter.locale_suffix_fallback_order`，使用相同的列表格式。
 `exclude_non_equivalent_same_ids` 默认为 True：明确以 `{字}` 区分的字形不会仅因 IDS 相同就互认。设为 False 可允许这类同 IDS 匹配。
 
 ## 导入数据
@@ -281,6 +307,9 @@ database.import_private_file(
 `last_import_report` 是一个字典，主要字段包括：`input_lines`、`data_lines`、`source_expressions`、`accepted_expressions`、`rejected_expressions`、`query_cache_entries`、`rebuilt_cache_glyphs`、`cache_truncations` 和 `issues`。`issues` 中的每项包含 `line`、`ids_index`、`character_index`、`glyph`、`expression` 和 `message`，适合显示导入错误位置。
 
 导入完成后，数据库会从原始 IDS 生成 HV 缓存、笔画中性组合缓存和一级部件倒排索引。`raw_ids()` 返回原始定义，`ids()` 返回查询缓存；缺失或旧版索引会在加载数据库时重建或迁移。需要从原始定义重新生成派生数据时，建议重新导入数据库或使用 C++ API 的 `RebuildQueryCache()`。C++ 导入 API 支持阶段回调，当前 Python binding 尚未暴露该回调。
+
+0.4.0 的白式数据库要求 schema 8；旧 schema 必须从源文件重新导入，不能仅靠重建缓存恢复另类定义组信息。完整导入基础库会替换数据库内容，随后需要重新导入私有扩展，因此请保留两类源文件。升级流程见 [cli-zh.md](cli-zh.md#升级至-040)。
+
 ## 对象和线程
 
 - IDSNode 和数据库返回对象拥有自己的数据；

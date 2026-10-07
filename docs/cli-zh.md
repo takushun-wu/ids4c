@@ -23,6 +23,12 @@ ids4c-cli --import-iwds SOURCE.xml
 
 一次调用只能执行一个主要操作。除 --import-iwds 外，主要操作都需要 --database。
 
+`--version` 不打开数据库，直接输出版本、版权和许可证信息：
+
+```powershell
+.\build\ids4c-cli.exe --version
+```
+
 ## 查询参数
 
 | 参数 | 短参数 | 说明 |
@@ -33,6 +39,7 @@ ids4c-cli --import-iwds SOURCE.xml
 | --explain | -e | 输出详细匹配信息 |
 | --show-ids | | --explain 的别名 |
 | --no-match-paths | | 关闭详细匹配路径计算 |
+| --profile | | 向标准错误输出查询分段计时和候选计数 |
 
 GLYPH 可以是实际字符、U+XXXX、0xXXXX 或抽象字形名。
 
@@ -48,10 +55,16 @@ GLYPH 可以是实际字符、U+XXXX、0xXXXX 或抽象字形名。
 | --glyph-domain | all、unicode、private、abstract | 字形域筛选 |
 | --unicode-block | 逗号分隔 | Unicode 区块筛选 |
 | --ignore-overlay | 无值 | 忽略匹配路径使用 ⿻ 的结果 |
+| --overlap-match-mode | ignore、constrained | 默认忽略重叠修饰符，或限定重叠矩阵状态 |
+| --strict-enclosure-match | 无值 | 关闭包围结构近似匹配，保留严格重排 |
 
 --unicode-block 支持 all、cjk、basic、ext-a 至 ext-j、compatibility、radicals、strokes、private-bmp、private-plane15、private-plane16、abstract 和 other。
 
 `ignore-other-locales-base-only` 将同一基码位的所有 IVS 变体视为一个结果；`ignore-other-locales-keep-ivs` 将「基码位 + 异体字选择符」（包括没有选择符）分别视为独立结果。严格 locale 筛选只在本次查询实际命中的字形中选择，`--locale-suffix-order` 不会令未命中的基础字形参与筛选。旧值 `ignore-other-locales` 已不再接受。
+
+明确设置顺序（例如 `C=G>.>H>T`）时，`=` 表示同级，`>` 表示回退优先级。字形完全没有无后缀定义时，可以保留优先级最高的可用组中实际命中的地区字形；若无后缀定义存在但不匹配，不以其他地区的命中替代它。
+
+`--ignore-overlay` 是排除重叠命中；`--overlap-match-mode constrained` 则允许重叠结构，但检查其修饰符。通配符及包围规则见 [query-syntax-zh.md](query-syntax-zh.md)。`--strict-enclosure-match` 独立于 IWDS 等级，只关闭包围近似规则，不关闭 IWDS 模糊统合。
 
 ## 输出格式
 
@@ -122,6 +135,13 @@ IDS 导入时，CLI 会向标准错误输出当前阶段（读取、HV 缓存、
 IDS 导入成功后会从原始表达式生成 HV 查询缓存、笔画中性组合缓存和一级部件倒排索引。原始 IDS 与派生数据都写入同一个 SQLite 数据库；缓存和索引不应手工编辑。私有库追加或重新导入时，受影响字形的缓存和索引会更新。缺失或旧版部件索引会在加载数据库时重建或迁移。
 
 如果原始数据库来自新的 `ids_lv0.txt` 或者缓存内容与输入文件不一致，可以重新导入数据库；C++ API 还提供 `RebuildQueryCache()` 供上层程序从当前原始 IDS 重建缓存。导入报告会给出接受的表达式数、缓存条目数、缓存截断数以及错误列表。
+
+### 升级至 0.4.0
+
+旧 schema 的白式数据库需要使用源文本通过 `--import ... --format yibai` 重新导入。Schema 8 保存默认/另类定义组信息，旧数据库无法可靠恢复这项元数据，因此仅重建缓存不够。完整导入基础库会替换数据库内容，随后需要从源文件重新导入私有扩展。升级前请保留这些源文件。
+
+`(.,T)` 等逗号分隔的变体标识分别生成无后缀和 `T` 记录；另类定义以 `ids_entries.is_alternative` 保存。该标记记录来源组，不会使这些定义被查询排除。
+
 ## 查询示例
 
 基本结构查询：
@@ -163,6 +183,22 @@ JSON 输出：
   --output-format json `
   --json-unicode escaped
 ```
+
+限定重叠状态的查询：
+
+```powershell
+.\build\ids4c-cli.exe --database yibai0 `
+  --overlap-match-mode constrained --query "⿻[?,x]丨日"
+```
+
+### 查询分段计时
+
+```powershell
+.\build\ids4c-cli.exe --database yibai0 `
+  --unification-level lv2 --profile --query "<search=日,欠>"
+```
+
+`[profile]` 行以毫秒记录预处理、same-IDS 展开、候选索引、扫描、结果筛选和详细信息构建的耗时。`index_used=A/B` 表示 B 次索引尝试中有 A 次采用候选筛选，并不表示所有查询都能用索引；不适用的情况会回退扫描。计时用于诊断，不是性能保证；`--no-match-paths` 可以减少详细结果的路径计算。计时写入标准错误，不改变标准输出的结果格式。
 
 ## 运行目录
 

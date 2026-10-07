@@ -23,6 +23,12 @@ Show all options:
 
 One main operation must be selected per invocation. All operations except --import-iwds require --database.
 
+`--version` prints the version, copyright, and license without opening a database:
+
+```powershell
+.\build\ids4c-cli.exe --version
+```
+
 ## Query options
 
 | Option | Short form | Description |
@@ -33,6 +39,7 @@ One main operation must be selected per invocation. All operations except --impo
 | --explain | -e | Print detailed match information |
 | --show-ids | | Alias for --explain |
 | --no-match-paths | | Disable detailed match-path calculation |
+| --profile | | Print query-stage timings and candidate counts to stderr |
 
 GLYPH can be an actual character, U+XXXX, 0xXXXX, or an abstract glyph name.
 
@@ -48,10 +55,16 @@ GLYPH can be an actual character, U+XXXX, 0xXXXX, or an abstract glyph name.
 | --glyph-domain | all, unicode, private, abstract | Glyph-domain filter |
 | --unicode-block | Comma-separated | Unicode-block filter |
 | --ignore-overlay | No value | Ignore results whose matching path uses ⿻ |
+| --overlap-match-mode | ignore, constrained | Ignore overlap modifiers (default), or constrain matrix states |
+| --strict-enclosure-match | No value | Disable approximate enclosure layouts; retain exact reassociation |
 
 --unicode-block accepts all, cjk, basic, ext-a through ext-j, compatibility, radicals, strokes, private-bmp, private-plane15, private-plane16, abstract, and other.
 
 `ignore-other-locales-base-only` treats all IVS variants of a base code point as one result. `ignore-other-locales-keep-ivs` treats each base-code-point/variation-selector pair (including no selector) as a separate result. Strict locale filtering chooses among glyphs that actually matched the query; `--locale-suffix-order` does not make an unmatched base glyph eligible. The former `ignore-other-locales` value is no longer accepted.
+
+With an explicit order such as `C=G>.>H>T`, `=` groups suffixes at the same priority and `>` orders fallback groups. If no unsuffixed definition exists, filtering can retain matching localized glyphs from the preferred available group. If an unsuffixed definition exists but does not match, a localized hit does not replace it.
+
+`--ignore-overlay` excludes overlay matches; `--overlap-match-mode constrained` instead allows overlays and checks their modifiers. For wildcard details and enclosure rules, see [query-syntax.md](query-syntax.md). `--strict-enclosure-match` is independent of the IWDS level: it disables enclosure approximations, not IWDS fuzzy unification.
 
 ## Output formats
 
@@ -122,6 +135,13 @@ IDS imports print their current stage to stderr (reading, HV cache, stroke-neutr
 A successful IDS import builds the HV query cache, stroke-neutral composition cache, and first-level component index from the raw expressions. Raw IDS and derived data are stored in the same SQLite database; the caches and index should not be edited manually. Adding or reimporting private data updates the affected glyphs and index. Missing or older component indexes are rebuilt or migrated when the database is loaded.
 
 If a database was generated from a new `ids_lv0.txt`, or if its derived data no longer matches the source file, reimport the database. The C++ API also provides `RebuildQueryCache()` to rebuild derived data from the raw IDS currently loaded in the database. The import report contains accepted expressions, cache entries, cache truncations, and detailed issues.
+
+### Upgrading to 0.4.0
+
+YiBai databases created with an older schema must be reimported from the source text using `--import ... --format yibai`. Schema 8 stores default/alternative definition-group metadata that cannot be recovered reliably from an older database. Rebuilding caches alone is insufficient. A full base import replaces the database contents; then reimport private extensions from their source files. Keep those sources before upgrading.
+
+Variant lists such as `(.,T)` create separate unsuffixed and `T` records; identifiers are comma-separated. Alternative definitions are stored with `ids_entries.is_alternative`. This flag records the source group; it does not exclude those definitions from queries.
+
 ## Query examples
 
 Basic structural query:
@@ -163,6 +183,22 @@ JSON output:
   --output-format json `
   --json-unicode escaped
 ```
+
+Constrained overlap query:
+
+```powershell
+.\build\ids4c-cli.exe --database yibai0 `
+  --overlap-match-mode constrained --query "⿻[?,x]丨日"
+```
+
+### Query profiling
+
+```powershell
+.\build\ids4c-cli.exe --database yibai0 `
+  --unification-level lv2 --profile --query "<search=日,欠>"
+```
+
+The `[profile]` lines report milliseconds for preprocessing, same-IDS expansion, candidate indexing, scanning, result filtering, and detailed output construction. `index_used=A/B` means A of B index attempts used candidate filtering; it does not mean every query can use the index. Unsupported cases fall back to scanning. Timings are diagnostic measurements, not a performance guarantee; `--no-match-paths` can reduce detailed-output work. Profiling uses stderr and does not change the selected stdout result format.
 
 ## Runtime directory
 

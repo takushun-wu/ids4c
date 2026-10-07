@@ -180,11 +180,15 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         _lastError = "Unknown database format.";
         ok         = false;
     }
-    if(ok && schemaVersion != "5" && schemaVersion != "6" && schemaVersion != "7") {
-        _lastError = "Database schema 5, 6 or 7 is required. Please reimport the source IDS file.";
+    if(ok && schemaVersion != "5" && schemaVersion != "6" && schemaVersion != "7" && schemaVersion != "8") {
+        _lastError = "Unsupported database schema. Please reimport the source IDS file.";
         ok         = false;
     }
-    const bool hasPrivateGlyphTable = schemaVersion == "6" || schemaVersion == "7";
+    if(ok && format == IDSDB_YIBAI && schemaVersion != "8") {
+        _lastError = "This YiBai database predates alternative-definition metadata. Please reimport the source IDS file.";
+        ok = false;
+    }
+    const bool hasPrivateGlyphTable = schemaVersion == "6" || schemaVersion == "7" || schemaVersion == "8";
     const bool rebuildHVCache = hvCacheVersion != "5";
 
     if(ok) {
@@ -193,10 +197,14 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
         _format = format;
         ConfigureDatabaseFormat(config, _format);
 
-        SQLiteStatement rawStatement(database,
-            "SELECT glyphs.glyph_key, ids_entries.raw_ids_text "
-            "FROM ids_entries JOIN glyphs ON glyphs.id = ids_entries.glyph_id "
-            "ORDER BY ids_entries.glyph_id, ids_entries.ordinal");
+        const char* rawQuery = schemaVersion == "8"
+            ? "SELECT glyphs.glyph_key, ids_entries.raw_ids_text, ids_entries.is_alternative "
+              "FROM ids_entries JOIN glyphs ON glyphs.id = ids_entries.glyph_id "
+              "ORDER BY ids_entries.glyph_id, ids_entries.ordinal"
+            : "SELECT glyphs.glyph_key, ids_entries.raw_ids_text, 0 "
+              "FROM ids_entries JOIN glyphs ON glyphs.id = ids_entries.glyph_id "
+              "ORDER BY ids_entries.glyph_id, ids_entries.ordinal";
+        SQLiteStatement rawStatement(database, rawQuery);
         if(!rawStatement.valid()) {
             _lastError = "The database does not contain raw IDS entries.";
             ok         = false;
@@ -207,6 +215,7 @@ bool IDSdatabase::LoadSqliteDatabase(const std::string& filename) {
                 const std::string rawText   = SQLiteColumnText(rawStatement.get(), 1);
                 const std::string uniqueSeparator = SQLiteLeadingUniqueSeparator(rawText);
                 IDSOwner          raw       = ParseIDSOwned(rawText);
+                if(raw != nullptr) raw->SetAlternativeDefinition(sqlite3_column_int(rawStatement.get(), 2) != 0);
                 if(raw == nullptr || !AddRawIDS(Ideograph(glyphText), std::move(raw), uniqueSeparator)) {
                     _lastError = "Invalid raw IDS entry for " + glyphText;
                     ok         = false;
@@ -514,6 +523,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         "  ordinal INTEGER NOT NULL,"
         "  raw_ids_text TEXT NOT NULL,"
         "  stroke_count TEXT NOT NULL DEFAULT '[]',"
+        "  is_alternative INTEGER NOT NULL DEFAULT 0 CHECK(is_alternative IN (0, 1)),"
         "  PRIMARY KEY (glyph_id, ordinal)"
         ");"
         "CREATE TABLE query_ids_entries ("
@@ -555,7 +565,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
         SQLiteStatement glyphStatement(database,
             "INSERT INTO glyphs(glyph_key, codepoint, variation_selector, suffix, abstract_name, stroke_count) " "VALUES(?, ?, ?, ?, ?, ?)");
         SQLiteStatement rawStatement(
-            database, "INSERT INTO ids_entries(glyph_id, ordinal, raw_ids_text, stroke_count) VALUES(?, ?, ?, ?)");
+            database, "INSERT INTO ids_entries(glyph_id, ordinal, raw_ids_text, stroke_count, is_alternative) VALUES(?, ?, ?, ?, ?)");
         SQLiteStatement queryStatement(
             database, "INSERT INTO query_ids_entries(glyph_id, ordinal, ids_text) VALUES(?, ?, ?)");
         SQLiteStatement sameExpressionStatement(
@@ -582,7 +592,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
             return sqlite3_step(metadataStatement.get()) == SQLITE_DONE;
         };
         if(ok) ok = insertMetadata("format", DatabaseFormatName(_format));
-        if(ok) ok = insertMetadata("schema_version", "6");
+        if(ok) ok = insertMetadata("schema_version", "8");
         if(ok) ok = insertMetadata("hv_cache_version", "5");
         if(ok) ok = insertMetadata("component_index_version", kComponentIndexVersion);
 
@@ -632,6 +642,7 @@ bool IDSdatabase::SaveSqliteDatabase(const std::string& filename) {
                 sqlite3_bind_int64(rawStatement.get(), 2, static_cast<sqlite3_int64>(index));
                 sqlite3_bind_text(rawStatement.get(), 3, idsText.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(rawStatement.get(), 4, strokeCounts.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(rawStatement.get(), 5, ids->IsAlternativeDefinition() ? 1 : 0);
                 ok = sqlite3_step(rawStatement.get()) == SQLITE_DONE;
             }
         }

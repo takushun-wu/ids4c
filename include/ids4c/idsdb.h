@@ -159,10 +159,42 @@ struct IDSFilterOptions {
     std::vector<std::string>     localeSuffixFallbackOrder;
 };
 
+enum IDSOverlapMatchMode {
+    IDS_OVERLAP_MATCH_IGNORE,
+    IDS_OVERLAP_MATCH_CONSTRAINED,
+};
+
+const char* IDSOverlapMatchModeName(IDSOverlapMatchMode mode);
+bool ParseIDSOverlapMatchMode(const std::string& value, IDSOverlapMatchMode& mode);
+
+// 可选的查询诊断；时间为累计微秒，计数在同一次 MatchQuery/MatchDetailed 调用中累加。
+// 由调用方持有，查询期间通过 IDSqueryOptions::profile 借用；不启用时不读取时钟。
+struct IDSQueryProfile {
+    uint64_t preprocessingUs = 0;
+    uint64_t sameIDSUs = 0;
+    uint64_t candidateIndexUs = 0;
+    uint64_t candidateScanUs = 0;
+    uint64_t resultFilterUs = 0;
+    uint64_t detailSyntaxUs = 0;
+    uint64_t detailBuildUs = 0;
+    size_t equivalentQueries = 0;
+    size_t indexAttempts = 0;
+    size_t indexedPasses = 0;
+    size_t indexedCandidates = 0;
+    size_t visitedGlyphs = 0;
+    size_t evaluatedGlyphs = 0;
+    size_t entryMatchAttempts = 0;
+    size_t detailedGlyphs = 0;
+};
+
 typedef struct {
     IDSFilterOptions filter;
+    IDSOverlapMatchMode overlapMatchMode = IDS_OVERLAP_MATCH_IGNORE;
+    // 默认允许包围结构近似；开启后只保留精确匹配与等价重排，禁用新旧近似规则。
+    bool strictEnclosureMatch = false;
     // 关闭后仍返回匹配详情，但跳过路径递归和 HV 范围追踪。
     bool trackMatchPaths = true;
+    IDSQueryProfile* profile = nullptr;
 } IDSqueryOptions;
 
 using StrokeCountSet = std::unordered_set<uint32_t>;
@@ -266,6 +298,7 @@ typedef struct {
     std::vector<std::string> glyphs;
     std::string              expression; // 原始表达式，用于错误报告。
     std::string              ids;        // 实际交给 IDS 解析器的表达式。
+    bool                     isAlternative = false; // YiBai 第三个 TAB 栏的另类定义。
     // IDS.pdf 7.1 的根部唯一化分隔符，例如 {士}。为空表示没有明确区分。
     // 自定义读取器如果在预处理时保留了该标记，可以直接填写此字段。
     std::string              uniqueSeparator;
@@ -387,6 +420,8 @@ private:
     std::unordered_map<std::string, StrokeCountRange> _strokeRangeCache;
     // Active only while Match() evaluates a query with overlay filtering enabled.
     bool        _ignoreOverlayStructureForMatch = false;
+    bool        _constrainOverlapForMatch = false;
+    bool        _strictEnclosureMatchForMatch = false;
     IDSdbFormat _format                         = IDSDB_DEFAULT;
     std::string _idsDataSignature;
 
@@ -400,6 +435,7 @@ private:
     void BuildUnificationIDSGroupIndexes();
     void BuildDirectComponentIndex();
     bool FindIndexedSearchCandidates(IDS* query, IdeographSet& candidates);
+    bool FindRawLiteralSearchCandidates(IDS* query, IdeographSet& candidates) const;
 
     void           MakeStrokeDB();
     void           MakeStrokeRevDB();
@@ -451,7 +487,7 @@ private:
     void     ApplyResultFilter(std::vector<Ideograph>& result, const IDSqueryOptions& options) const;
 
     bool IDSarrayMatch(const std::vector<IDS*>& s, const std::vector<IDS*>& p, IDCtype arrangement,
-        size_t sIdx = 0, size_t pIdx = 0);
+        size_t sIdx = 0, size_t pIdx = 0, const std::vector<HVOriginRange>* sourceOrigins = nullptr);
     bool IDSmatch(IDS* idsInDB, IDS* ids, bool surroundEqual = true);
     bool MatchIDSUnscoped(IDS* idsInDB, IDS* ids, bool surroundEqual = true);
     bool MatchVariable(IDS* idsInDB, IDSVariable* variable);
@@ -474,6 +510,9 @@ private:
     bool MatchStroke(IDS* idsInDB, IDS* ids);
     bool MatchPattern(IDS* idsInDB, IDS* ids, bool surroundEqual);
     bool MatchPatternPair(Pattern* pidsInDB, Pattern* pids, bool surroundEqual);
+    bool MatchReassociatedEnclosure(Pattern* pidsInDB, Pattern* pids);
+    bool MatchInternalEnclosureReassociation(Pattern* pidsInDB, Pattern* pids);
+    bool MatchApproximateEnclosureLayout(Pattern* candidate, Pattern* query);
     bool ContainsQueryOnlyOperator(IDS* ids);
     IDSOwnerList              BuildReplaceQueries(Pattern* replaceQuery);
     IDSOwnerList              BuildSubtractQueries(Pattern* subtractQuery);
