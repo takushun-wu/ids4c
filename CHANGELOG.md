@@ -1,5 +1,25 @@
 # 变更记录 / Changelog
 
+## v0.4.1
+
+### 修复 / Fixed
+
+- 修复单部件 `<search=...>` 在递归展开字形时只检查 HV 缓存，导致原始部件被来源保护遮蔽后的漏匹配。例如 `<search=爿>` 现在可以沿 `奘 → ⿱壯大 → ⿰爿士` 找到“奘”。
+- 快速匹配路径在展开带 HV 来源范围的字形时补查其原始 IDS，并保留原有的唯一化排除规则，避免把“士”和“土”等明确区分的部件混同。
+- 补充单项搜索、嵌套 `<any>`、详细匹配路径及 SQLite 重载的回归测试，并检查原始 IDS 回退不会绕过唯一化限制。
+
+- Fixed missed matches in single-component `<search=...>` queries when recursive glyph expansion checked only the HV cache and origin protection obscured an original component. For example, `<search=爿>` now finds `奘` through `奘 → ⿱壯大 → ⿰爿士`.
+- The fast matching path now also checks raw IDS definitions when expanding glyphs with HV origin ranges. Existing uniqueness exclusions remain enforced, so explicitly distinguished components such as `士` and `土` are not conflated.
+- Added regression coverage for single-term searches, nested `<any>` expressions, detailed match paths, and SQLite reloads, including checks that raw IDS fallback preserves uniqueness restrictions.
+
+### 升级说明 / Upgrade Notes
+
+- 从 v0.4.0 升级无需重新导入数据库或重建缓存；更新程序及使用中的 Python 模块即可。从更早版本升级时，仍需遵循 v0.4.0 的白式数据库重新导入要求。
+- 本次修复不改变查询语法或数据库格式；部件搜索可能返回此前遗漏的有效结果。
+
+- Upgrading from v0.4.0 requires no database reimport or cache rebuild; update the application and any Python module in use. Upgrades from earlier versions must still follow the YiBai database reimport requirements documented for v0.4.0.
+- Query syntax and database format are unchanged. Component searches may return valid matches that were previously missed.
+
 ## v0.4.0
 
 ### 新增 / Added

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ids4c VERSION 0.4.0 LANGUAGES CXX)
+project(ids4c VERSION 0.4.1 LANGUAGES CXX)
 
 set(IDS4C_COPYRIGHT "Copyright 2026 Takushun Wu.")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/ids4c")

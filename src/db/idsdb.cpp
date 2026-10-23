@@ -3153,7 +3153,18 @@ bool IDSdatabase::MatchSearchTermCached(IDS* idsInDB, IDS* term) {
                 if(_cache_BasicIdeo.find(candidate) == _cache_BasicIdeo.end() &&
                     !(config.fuzzyMatch.excludeNonEquivalentSameIDS && IsIdeograph(term) &&
                         IsNonEquivalentSameIDS(candidate, *AsIdeograph(term)))) {
-                    for(IDS* expansion: FindIDS(candidate)) {
+                    std::vector<IDS*> definitions = FindIDS(candidate);
+                    // 与消费匹配保持一致：来源保护可能遮蔽原始部件，需补查该字形的原式。
+                    if(std::any_of(definitions.begin(), definitions.end(), HasHVOriginRange)) {
+                        const auto rawDefinitions = _rawIDSDB.find(candidate);
+                        if(rawDefinitions != _rawIDSDB.end())
+                            for(const auto& raw: rawDefinitions->second) {
+                                const bool duplicate = std::any_of(definitions.begin(), definitions.end(),
+                                    [&](IDS* cachedDefinition) { return IDSequal(cachedDefinition, raw.get()); });
+                                if(!duplicate) definitions.push_back(raw.get());
+                            }
+                    }
+                    for(IDS* expansion: definitions) {
                         if(MatchSearchTermCached(expansion, term)) {
                             matched = true;
                             break;

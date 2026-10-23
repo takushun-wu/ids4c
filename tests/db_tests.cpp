@@ -843,6 +843,10 @@ int main() {
         source << u8"亠\t⿱丶一\n";
         source << u8"言\t⿳亠二口\t⿳丶三口\n";
         source << u8"誓\t⿱折言\n";
+        source << u8"丆\t⿱一丿\n";
+        source << u8"爿\t⿰⿱𠃊丆丨\n";
+        source << u8"壯\t⿰爿士\n";
+        source << u8"奘\t⿱壯大\n";
     }
     {
         IDSdatabase hvOriginDatabase("hv-origin");
@@ -862,6 +866,19 @@ int main() {
             return Fail("An HV origin range did not preserve matching of the original ambiguous glyph.");
         if(ExpectMatch(hvOriginDatabase, u8"<search=土>", u8"吉"))
             return Fail("An HV origin range still confused 士 with 土 after expansion.");
+        if(!ExpectMatch(hvOriginDatabase, u8"<search=爿>", u8"奘") ||
+            !ExpectMatch(hvOriginDatabase, u8"<search=<any=爿,欠>>", u8"奘"))
+            return Fail("Single-term search lost a nested raw component behind HV origin ranges.");
+        if(ExpectMatch(hvOriginDatabase, u8"<search=土>", u8"奘"))
+            return Fail("Nested raw fallback confused the explicit 士 source with 土.");
+        IDSOwner nestedWallQuery = ParseIDSOwned(u8"<search=爿>");
+        const auto nestedWallDetails = hvOriginDatabase.MatchDetailed(nestedWallQuery.get());
+        const auto nestedWall = std::find_if(nestedWallDetails.begin(), nestedWallDetails.end(),
+            [](const IDSMatchDetail& detail) { return detail.glyph == Ideograph(u8"奘"); });
+        if(nestedWall == nestedWallDetails.end() || nestedWall->matchPaths.empty() ||
+            std::all_of(nestedWall->matchPaths.begin(), nestedWall->matchPaths.end(),
+                [](const IDSMatchPath& path) { return path.path.empty() || path.path == "/"; }))
+            return Fail("Nested raw component search did not report its matching path.");
         const IDSOwnerList cachedHu = hvOriginDatabase.GetIDSOwned(Ideograph(u8"㞷"));
         if(cachedHu.empty()) return Fail("HVExtract did not produce any cached expansion for the ambiguous glyph.");
         if(ExpectMatch(hvOriginDatabase, u8"<search=士>", u8"㞷"))
@@ -913,6 +930,8 @@ int main() {
     std::remove("db/hv-origin.dat");
     {
         IDSdatabase reloadedHVOriginDatabase("hv-origin");
+        if(!ExpectMatch(reloadedHVOriginDatabase, u8"<search=爿>", u8"奘"))
+            return Fail("Nested raw component search changed after SQLite reload.");
         const IDSOwnerList cachedJi = reloadedHVOriginDatabase.GetIDSOwned(Ideograph(u8"吉"));
         if(cachedJi.size() != 1 || cachedJi.front()->toString().find(u8"[士=0:2]") == std::string::npos)
             return Fail("HV origin-range metadata did not survive SQLite reload.");
